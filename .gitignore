@@ -1,7 +1,13 @@
+# 本机 AI/IDE 配置
 .codex/
 .claude/
-CLAUDE.md
+.codegraph/
+.theia/
 .mcp.json
-.codegraph
+.vscode/
 
-TICar.theia-workspace
+# 本机工作区
+/*.theia-workspace
+
+# 个人 Claude Code 指令
+CLAUDE.md
