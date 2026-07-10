@@ -37,11 +37,6 @@ UART1.peripheral.txPin.$assign = "PA10";
 UART1.txPinConfig.$name        = "ti_driverlib_gpio_GPIOPinGeneric0";
 UART1.rxPinConfig.$name        = "ti_driverlib_gpio_GPIOPinGeneric1";
 
-ProjectConfig.genLinker  = false;
-ProjectConfig.genStartup = false;
-ProjectConfig.genLibs    = false;
-scripting.suppress("All four File Generation options must be enabled in order to guarantee Device Migration support\\. If an option is disabled, the user must manually configure that setting on its own file\\.", ProjectConfig);
-
 /**
  * Pinmux solution for unlocked pins/peripherals. This ensures that minor changes to the automatic solver in a future
  * version of the tool will not impact the pinmux you originally saw.  These lines can be completely deleted in order to
