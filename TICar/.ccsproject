@@ -5,10 +5,14 @@
 	<ccsVersion value="71.0.0"/>
 	<deviceFamily value="TMS470"/>
 	<connection value="common/targetdb/connections/TIXDS110_Connection.xml"/>
+	<executableActions value=""/>
 	<createSlaveProjects value=""/>
-	<templateProperties value="id=com.ti.ccs.project.emptyProjectWithMainTemplate_ticlang"/>
+	<ignoreDefaultDeviceSettings value="true"/>
+	<ignoreDefaultCCSSettings value="true"/>
+	<templateProperties value="id=26TICup_MSPM0_Bringup.projectspec.26TICup_MSPM0_Bringup,buildProfile=release,isHybrid=true"/>
 	<activeTargetConfiguration value="targetConfigs/MSPM0G3507.ccxml"/>
 	<isTargetConfigurationManual value="false"/>
-	<origin value="project-wizard"/>
-	<filesToOpen value="main.c"/>
+	<sourceLookupPath value="${COM_TI_MSPM0_SDK_INSTALL_DIR}/source/ti/driverlib"/>
+	<origin value="D:\2026TI_Cup\26TICup_MSPM0_Bringup\ticlang\26TICup_MSPM0_Bringup.projectspec"/>
+	<filesToOpen value="main.c,README.md,M0_Bringup.syscfg"/>
 </projectOptions>

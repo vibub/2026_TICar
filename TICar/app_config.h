@@ -1,0 +1,14 @@
+#ifndef APP_CONFIG_H
+#define APP_CONFIG_H
+
+#define APP_MODE_HEARTBEAT 1
+#define APP_MODE_K230_UART 2
+#define APP_MODE_MOTOR_PWM 3
+#define APP_MODE_CCD_ADC   4
+#define APP_MODE_UART_TEST 5
+#define APP_MODE_CCD_WATCH 6
+#define APP_MODE_LINE_FOLLOW 7
+
+#define APP_MODE APP_MODE_LINE_FOLLOW
+
+#endif
