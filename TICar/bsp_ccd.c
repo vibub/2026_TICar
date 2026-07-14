@@ -21,6 +21,8 @@ static int16_t g_ccd_target_index = -1;
 static int16_t g_ccd_line_error = 0;
 static int16_t g_ccd_dx_max = 0;
 static int16_t g_ccd_dx_min = 0;
+static uint16_t g_ccd_dx_max_index = 0U;
+static uint16_t g_ccd_dx_min_index = 0U;
 static uint8_t g_ccd_line_valid = 0U;
 static uint16_t g_ccd_raw_min = 0U;
 static uint16_t g_ccd_raw_max = 0U;
@@ -223,15 +225,19 @@ void Bsp_Ccd_Process(void)
 
     g_ccd_dx_max = 0;
     g_ccd_dx_min = 0;
+    g_ccd_dx_max_index = 0U;
+    g_ccd_dx_min_index = 0U;
     for (i = 0U; i < (BSP_CCD_PIXEL_COUNT - 3U); i++) {
         g_ccd_dx[i] = (int16_t) g_ccd_filtered[i] - (int16_t) g_ccd_filtered[i + 3U]; // Edge detector copied from 2025 code.
         if (g_ccd_dx[i] > g_ccd_dx_max) {
             g_ccd_dx_max = g_ccd_dx[i];
             max_idx = i;
+            g_ccd_dx_max_index = i; // Mirror 2025 MaxIdx for debugger inspection.
         }
         if (g_ccd_dx[i] < g_ccd_dx_min) {
             g_ccd_dx_min = g_ccd_dx[i];
             min_idx = i;
+            g_ccd_dx_min_index = i; // Mirror 2025 MinIdx for debugger inspection.
         }
     }
 
@@ -255,23 +261,26 @@ void Bsp_Ccd_Process(void)
     }
 
     if (best_len >= BSP_CCD_MIN_BLACK_WIDTH) {
+        g_ccd_black_width = best_len; // Keep dark-run width as debug information, not as the target source.
+        g_ccd_black_left = (int16_t) best_start; // Keep dark-run left edge for Watch/Expressions.
+        g_ccd_black_right = (int16_t) (best_start + best_len - 1U); // Keep dark-run right edge for Watch/Expressions.
+    } else {
+        g_ccd_black_width = 0U; // No reliable dark run found for debug display.
+        g_ccd_black_left = -1; // Mark debug dark-run edge invalid.
+        g_ccd_black_right = -1; // Mark debug dark-run edge invalid.
+    }
+
+    if ((g_ccd_dx_max > 0) &&
+        (g_ccd_dx_min < 0) &&
+        (((int16_t) min_idx - (int16_t) max_idx) > BSP_CCD_TARGET_MIN_EDGE_GAP)) {
         g_ccd_line_valid = 1U;
-        g_ccd_black_width = best_len;
-        g_ccd_black_left = (int16_t) best_start;
-        g_ccd_black_right = (int16_t) (best_start + best_len - 1U);
-        g_ccd_target_index = (int16_t) (best_start + ((best_len - 1U) >> 1U)); // Black line center is the midpoint of the widest dark run.
+        g_ccd_target_index = (int16_t) ((max_idx + min_idx) >> 1U); // Match 2025 code: center is midpoint of strongest falling/rising edges.
         g_ccd_line_error = g_ccd_target_index - BSP_CCD_CENTER_INDEX; // Positive error means the detected line is to the right.
     } else {
         g_ccd_line_valid = 0U;
-        g_ccd_black_width = 0U;
-        g_ccd_black_left = -1;
-        g_ccd_black_right = -1;
         g_ccd_target_index = -1; // -1 means no reliable black line was detected.
         g_ccd_line_error = 0;
     }
-
-    (void) max_idx;
-    (void) min_idx;
 }
 
 void Bsp_Ccd_PrintDebugFrame(void)
@@ -366,4 +375,24 @@ uint16_t Bsp_Ccd_GetRawMinIndex(void)
 uint16_t Bsp_Ccd_GetRawMaxIndex(void)
 {
     return g_ccd_raw_max_index;
+}
+
+int16_t Bsp_Ccd_GetDxMax(void)
+{
+    return g_ccd_dx_max;
+}
+
+int16_t Bsp_Ccd_GetDxMin(void)
+{
+    return g_ccd_dx_min;
+}
+
+uint16_t Bsp_Ccd_GetDxMaxIndex(void)
+{
+    return g_ccd_dx_max_index;
+}
+
+uint16_t Bsp_Ccd_GetDxMinIndex(void)
+{
+    return g_ccd_dx_min_index;
 }
