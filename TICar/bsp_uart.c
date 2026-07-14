@@ -1,4 +1,3 @@
-#include <stddef.h>
 #include "bsp_uart.h"
 
 #include "ti_msp_dl_config.h"
@@ -28,19 +27,6 @@ void Bsp_Uart_K230_SendString(const char *str)
         Bsp_Uart_K230_SendByte((uint8_t) *str);
         str++;
     }
-}
-
-uint8_t Bsp_Uart_K230_TryReceiveByte(uint8_t *byte)
-{
-    if (byte == NULL) {
-        return 0U;
-    }
-
-    if (DL_UART_Main_receiveDataCheck(UART_K230_INST, byte)) {
-        return 1U;
-    }
-
-    return 0U;
 }
 
 uint8_t Bsp_Uart_K230_ReceiveByteBlocking(void)

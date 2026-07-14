@@ -1,4 +1,4 @@
-# 26TICup_MSPM0_Bringup
+# TICar
 
 This is the clean MSPM0G3507 bringup project for the 2026 TI Cup car.
 
@@ -6,7 +6,7 @@ This is the clean MSPM0G3507 bringup project for the 2026 TI Cup car.
 
 Import this project from:
 
-`D:\2026TI_Cup\26TICup_MSPM0_Bringup\ticlang\26TICup_MSPM0_Bringup.projectspec`
+`D:\2026TI_Cup\2026_TICar\TICar\ticlang\26TICup_MSPM0_Bringup.projectspec`
 
 Use CCS Theia with the MSPM0 SDK installed.
 

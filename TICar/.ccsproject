@@ -9,10 +9,10 @@
 	<createSlaveProjects value=""/>
 	<ignoreDefaultDeviceSettings value="true"/>
 	<ignoreDefaultCCSSettings value="true"/>
-	<templateProperties value="id=26TICup_MSPM0_Bringup.projectspec.26TICup_MSPM0_Bringup,buildProfile=release,isHybrid=true"/>
+	<templateProperties value="id=TICar.projectspec.TICar,buildProfile=release,isHybrid=true"/>
 	<activeTargetConfiguration value="targetConfigs/MSPM0G3507.ccxml"/>
 	<isTargetConfigurationManual value="false"/>
 	<sourceLookupPath value="${COM_TI_MSPM0_SDK_INSTALL_DIR}/source/ti/driverlib"/>
-	<origin value="D:\2026TI_Cup\26TICup_MSPM0_Bringup\ticlang\26TICup_MSPM0_Bringup.projectspec"/>
+	<origin value="D:\2026TI_Cup\2026_TICar\TICar\ticlang\26TICup_MSPM0_Bringup.projectspec"/>
 	<filesToOpen value="main.c,README.md,M0_Bringup.syscfg"/>
 </projectOptions>

@@ -18,30 +18,32 @@
 #define APP_MOTOR_TEST_FAST_SPEED 0.45f // Fast wheel command for visible left/right mapping checks.
 #define APP_CCD_PRINT_DELAY (CPUCLK_FREQ / 2U) // Print CCD frames at 2 Hz so UART output stays readable.
 #define APP_CCD_LOG_FRAME_COUNT 32U // Keep a small RAM log that can be exported through the debugger.
-#define APP_LINE_BASE_SPEED 0.35f // Keep the first closed-loop map test slow enough to stop by hand.
-#define APP_LINE_KP 0.0012f // Softer proportional steering reduces straight-line overcorrection.
-#define APP_LINE_KD 0.0002f // Keep derivative small because the CCD target jitters on straight segments.
-#define APP_LINE_STEER_LIMIT 0.035f // Limit normal differential speed so straight tracking stays stable.
-#define APP_LINE_DEADBAND_ERROR 5 // Ignore small CCD center jitter so the car does not weave on straight lines.
-#define APP_LINE_MEDIUM_ERROR 8 // Start reducing base speed only after a visible CCD offset.
-#define APP_LINE_LARGE_ERROR 18 // Treat larger CCD pixel errors as a clear turn-recovery condition.
+#define APP_LINE_BASE_SPEED 0.19f // Back off half a step from 0.20 while bend stability is being tuned.
+#define APP_LINE_KP 0.0025f // STM32-style PD proportional gain for visible recovery in bends.
+#define APP_LINE_KD 0.0005f // Smaller derivative reduces correction flips from CCD target jitter.
+#define APP_LINE_STEER_LIMIT 0.130f // Stronger bend steering without direction lock.
+#define APP_LINE_MEDIUM_MIN_STEER 0.020f // Keep medium-error correction from kicking the car on straights.
+#define APP_LINE_LARGE_MIN_STEER 0.090f // Minimum recovery correction in bends before leaving the track.
+#define APP_LINE_CORRECTION_SLEW_LIMIT 0.025f // Limit per-frame steering jumps to reduce weaving through bends.
+#define APP_LINE_MEDIUM_SPEED_SCALE 0.75f // Slow earlier in bends so steering has time to work.
+#define APP_LINE_LARGE_SPEED_SCALE 0.45f // Slow aggressively in large-error bend recovery.
+#define APP_LINE_DEADBAND_ERROR 5 // Keep center-line jitter from causing visible dithering.
+#define APP_LINE_MEDIUM_ERROR 6 // Start reducing base speed after a small but visible CCD offset.
+#define APP_LINE_LARGE_ERROR 12 // Treat larger CCD pixel errors as a clear recovery condition.
 #define APP_LINE_STEER_SIGN 1.0f // Keep steering sign positive after logical left/right motor mapping is fixed.
 #define APP_CCD_STRAIGHT_SPEED 0.16f // Straight-only CCD test speed uses equal wheel commands and no steering correction.
+#define APP_CIRCLE_BASE_SPEED APP_LINE_BASE_SPEED // Circle mode uses the same single CCD PD baseline.
+#define APP_CIRCLE_KP APP_LINE_KP // Reuse the stable circle-follow proportional gain.
+#define APP_CIRCLE_KD APP_LINE_KD // Reuse the stable circle-follow derivative gain.
+#define APP_CIRCLE_STEER_SIGN APP_LINE_STEER_SIGN // Keep circle sign aligned with the verified motor mapping.
+#define APP_CIRCLE_STEER_LIMIT APP_LINE_STEER_LIMIT // Reuse the clean circle-follow correction limit.
+#define APP_CIRCLE_MEDIUM_ERROR APP_LINE_MEDIUM_ERROR // Circle-mode medium-error threshold.
+#define APP_CIRCLE_LARGE_ERROR APP_LINE_LARGE_ERROR // Circle-mode large-error threshold.
+#define APP_CIRCLE_LOOP_DELAY (CPUCLK_FREQ / 50U) // Run the circle PD loop around 50 Hz.
 #define APP_LINE_LOOP_DELAY (CPUCLK_FREQ / 50U) // Run line-follow updates around 50 Hz like the STM32 reference.
-#define APP_LINE_CORNER_ENTER_ERROR 38 // Enter corner assist only when a valid target is near the CCD edge.
-#define APP_LINE_CORNER_EXIT_ERROR 14 // Exit corner mode after the line returns close enough for normal steering.
-#define APP_LINE_CORNER_ENTER_FRAMES 2U // Debounce valid-target corner entry without delaying true square corners too much.
-#define APP_LINE_CORNER_EXIT_FRAMES 3U // Require repeated good frames before leaving corner mode.
-#define APP_LINE_CORNER_LOST_ERROR 32 // Treat target loss after a near-edge offset as a likely square-map corner.
-#define APP_LINE_CORNER_LOST_FRAMES 4U // Require a longer lost-line debounce to avoid early straight-line corner entry.
-#define APP_LINE_CORNER_DIRECTION -1 // Square-map runs are counterclockwise, so every corner should be a left turn.
-#define APP_LINE_CORNER_SPEED 0.22f // Use forward corner speed like the STM32 reference instead of inside-wheel reverse.
-#define APP_LINE_CORNER_TURN 0.14f // Use same-direction differential turn so corner assist is less likely to over-rotate.
-#define APP_LINE_CORNER_MIN_COUNT 8U // Hold corner mode briefly so one good frame cannot end the turn early.
-#define APP_LINE_CORNER_MAX_COUNT 70U // Allow up to about 1.4 s of corner recovery while the CCD target is missing.
-#define APP_LINE_LOST_RECOVER_MAX 15U // Search briefly on target loss before stopping the car.
-#define APP_LINE_LOST_SPEED_SCALE 0.55f // Slow down during lost-line recovery so the car has time to reacquire the line.
-#define APP_LINE_LOST_TURN 0.055f // Apply a fixed recovery turn toward the last valid CCD error direction.
+#define APP_LINE_LOST_RECOVER_MAX 8U // Keep lost-line recovery short so straight segments do not weave.
+#define APP_LINE_LOST_SPEED_SCALE 0.55f // Slow down during lost-line recovery so the CCD has time to reacquire.
+#define APP_LINE_LOST_TURN 0.040f // Keep lost-line recovery gentle so straight segments do not weave.
 #define APP_ENCODER_WATCH_DELAY (CPUCLK_FREQ / 50U) // Sample encoder counts around 50 Hz for debugger inspection.
 #define APP_SPEED_TEST_TARGET_TICKS 8.0f // First speed-loop target in encoder ticks per 20 ms sample.
 #define APP_SPEED_TEST_LOOP_DELAY (CPUCLK_FREQ / 50U) // Run speed PID around 50 Hz like the line-follow loop.
@@ -92,13 +94,17 @@ volatile uint16_t g_debug_ccd_raw_min_index = 0U; // Watch this value to see whe
 volatile uint16_t g_debug_ccd_raw_max_index = 0U; // Watch this value to see where the brightest pixel is.
 volatile uint16_t g_debug_ccd_contrast = 0U; // Watch this value; low contrast means CCD/lighting is not reliable.
 volatile uint16_t g_debug_ccd_threshold = 0U; // Watch this value for the adaptive black-line threshold.
+volatile int16_t g_debug_ccd_dx_max = 0; // Watch this value for the strongest 2025-style positive CCD edge.
+volatile int16_t g_debug_ccd_dx_min = 0; // Watch this value for the strongest 2025-style negative CCD edge.
+volatile uint16_t g_debug_ccd_dx_max_index = 0U; // Watch this value for the positive-edge index used by the 2025 CCD algorithm.
+volatile uint16_t g_debug_ccd_dx_min_index = 0U; // Watch this value for the negative-edge index used by the 2025 CCD algorithm.
 volatile uint16_t g_debug_ccd_raw[BSP_CCD_PIXEL_COUNT]; // Watch this array to inspect all 128 raw CCD pixels.
 volatile uint16_t g_debug_ccd_log_write_index = 0U; // Watch this value to know which RAM log slot will be written next.
 volatile uint16_t g_debug_ccd_log_filled = 0U; // Watch this value; 32 means the RAM log has one full buffer.
 volatile App_CcdLogFrame g_debug_ccd_log[APP_CCD_LOG_FRAME_COUNT]; // Export this RAM block through CCS Memory Browser for CSV conversion.
 #endif
 
-#if (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CCD_STRAIGHT)
+#if (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CCD_STRAIGHT) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW)
 volatile uint8_t g_line_valid = 0U; // Watch this value; 1 means line-follow is actively driving.
 volatile int16_t g_line_target = -1; // Watch this value for the latest CCD target used by steering.
 volatile int16_t g_line_error = 0; // Watch this value for the latest centered CCD error.
@@ -112,12 +118,8 @@ volatile float g_line_correction = 0.0f; // Watch this value for the actual stee
 volatile float g_line_left_cmd = 0.0f; // Watch this value for the commanded logical left motor ratio.
 volatile float g_line_right_cmd = 0.0f; // Watch this value for the commanded logical right motor ratio.
 volatile int8_t g_line_recover_direction = 0; // Watch this value; -1 searches left, +1 searches right after target loss.
-volatile uint8_t g_line_corner_mode = 0U; // Watch this value; 1 means the car is forcing a square-map corner turn.
-volatile uint16_t g_line_corner_count = 0U; // Watch this value for how long the current corner recovery has lasted.
-volatile uint16_t g_line_corner_enter_count = 0U; // Watch this value for the large-error debounce before corner mode.
-volatile uint16_t g_line_corner_exit_count = 0U; // Watch this value for repeated good frames before corner exit.
-volatile int8_t g_line_corner_direction = 0; // Watch this value; -1 corners left, +1 corners right.
 static int16_t g_line_last_error = 0; // Keep the previous fixed-center error for the derivative steering term.
+static float g_line_last_correction = 0.0f; // Smooth steering output so CCD jitter does not kick the chassis.
 #endif
 
 #if APP_MODE == APP_MODE_UART_TEST
@@ -139,7 +141,7 @@ static void App_SendUint32(uint32_t value)
 }
 #endif
 
-#if APP_MODE == APP_MODE_LINE_FOLLOW
+#if (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW)
 static float App_LimitFloat(float value, float limit)
 {
     if (value > limit) {
@@ -147,6 +149,19 @@ static float App_LimitFloat(float value, float limit)
     }
     if (value < -limit) {
         return -limit; // Clamp negative correction to keep first map runs gentle.
+    }
+    return value;
+}
+
+static float App_LimitFloatDelta(float value, float last_value, float max_delta)
+{
+    float delta = value - last_value;
+
+    if (delta > max_delta) {
+        return last_value + max_delta;
+    }
+    if (delta < -max_delta) {
+        return last_value - max_delta;
     }
     return value;
 }
@@ -175,6 +190,10 @@ static void App_UpdateCcdWatchData(void)
     g_debug_ccd_raw_max_index = Bsp_Ccd_GetRawMaxIndex(); // Mirror brightest index to catch edge artifacts.
     g_debug_ccd_contrast = Bsp_Ccd_GetContrast(); // Mirror contrast so lighting can be judged in Watch.
     g_debug_ccd_threshold = Bsp_Ccd_GetThreshold(); // Mirror adaptive threshold for contrast checks.
+    g_debug_ccd_dx_max = Bsp_Ccd_GetDxMax(); // Mirror strongest positive edge for 2025-style target debugging.
+    g_debug_ccd_dx_min = Bsp_Ccd_GetDxMin(); // Mirror strongest negative edge for 2025-style target debugging.
+    g_debug_ccd_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Mirror positive-edge index for 2025-style target debugging.
+    g_debug_ccd_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Mirror negative-edge index for 2025-style target debugging.
     g_debug_ccd_frame_count++; // Increment after a complete mirrored frame is ready.
 
     log_index = g_debug_ccd_log_write_index;
@@ -211,7 +230,7 @@ void App_Init(void)
     g_app_debug_mode = APP_MODE; // Write the mode at runtime so CCS Watch can verify the loaded firmware.
     Bsp_Gpio_Init();
     Bsp_Uart_Init();
-#if (APP_MODE == APP_MODE_MOTOR_PWM) || (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CCD_STRAIGHT) || (APP_MODE == APP_MODE_SPEED_TEST)
+#if (APP_MODE == APP_MODE_MOTOR_PWM) || (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CCD_STRAIGHT) || (APP_MODE == APP_MODE_SPEED_TEST) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW)
     Bsp_Motor_Init();
 #else
     Bsp_Motor_Disable(); // Non-motor debug modes must keep PWM and H-bridge outputs idle.
@@ -227,10 +246,9 @@ void App_Init(void)
     Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC before the first frame read.
 #elif APP_MODE == APP_MODE_CCD_WATCH
     Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC for debugger-watch CCD sampling.
-#elif APP_MODE == APP_MODE_LINE_FOLLOW
-    Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC before closed-loop line following.
-    Bsp_Gpio_SetHeartbeat(0U); // Keep the blue heartbeat LED off so the red LED uniquely marks corner mode.
-    Bsp_Gpio_SetCornerIndicator(0U); // Start line-follow with the corner indicator off during straight mode.
+#elif (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_LINE_FOLLOW)
+    Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC before the single line-follow controller.
+    Bsp_Gpio_SetHeartbeat(0U); // Keep the heartbeat under loop control during CCD bringup.
 #elif APP_MODE == APP_MODE_CCD_STRAIGHT
     Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC before straight-only CCD gating.
 #elif APP_MODE == APP_MODE_UART_TEST
@@ -272,194 +290,108 @@ void App_Loop(void)
     App_UpdateCcdWatchData(); // Copy CCD results to volatile globals for CCS Watch/Expressions.
     Bsp_Gpio_ToggleHeartbeat(); // LED heartbeat confirms frames are updating without UART.
     delay_cycles(APP_CCD_PRINT_DELAY);
-#elif APP_MODE == APP_MODE_LINE_FOLLOW
-    Bsp_Ccd_ReadFrame(); // Capture the latest line position before each steering update.
+#elif (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_LINE_FOLLOW)
+    Bsp_Ccd_ReadFrame(); // Capture the latest line position before each CCD steering update.
     Bsp_Ccd_Process(); // Convert CCD pixels into a valid flag and centered error.
     if (Bsp_Ccd_IsLineValid() != 0U) {
         int16_t line_error = Bsp_Ccd_GetLineError();
         int16_t error_delta = (int16_t) (line_error - g_line_last_error);
         int16_t abs_error = (line_error < 0) ? (int16_t) (-line_error) : line_error;
-        float base_speed = APP_LINE_BASE_SPEED;
-        float steer_limit = APP_LINE_STEER_LIMIT;
-        float correction = APP_LINE_STEER_SIGN *
-                           ((APP_LINE_KP * (float) line_error) +
-                            (APP_LINE_KD * (float) error_delta));
+        float base_speed = APP_CIRCLE_BASE_SPEED;
+        float steer_limit = APP_CIRCLE_STEER_LIMIT;
+        float min_steer = 0.0f;
+        float correction = APP_CIRCLE_STEER_SIGN *
+                           ((APP_CIRCLE_KP * (float) line_error) +
+                            (APP_CIRCLE_KD * (float) error_delta));
+        float left_cmd;
+        float right_cmd;
 
         if (abs_error <= APP_LINE_DEADBAND_ERROR) {
-            correction = 0.0f; // Suppress tiny CCD jitter around center to reduce straight-line weaving.
-            error_delta = 0; // Clear derivative display when the error is inside the steering deadband.
+            correction = 0.0f; // Keep center-line jitter from causing visible dithering.
+            error_delta = 0; // Keep the derivative Watch value quiet inside the deadband.
+        } else if (abs_error >= APP_CIRCLE_LARGE_ERROR) {
+            base_speed = APP_CIRCLE_BASE_SPEED * APP_LINE_LARGE_SPEED_SCALE; // Slow aggressively on large errors so bends do not run wide.
+            steer_limit = APP_CIRCLE_STEER_LIMIT; // Keep full steering authority during recovery.
+            min_steer = APP_LINE_LARGE_MIN_STEER; // Force enough steering before the car runs wide.
+        } else if (abs_error >= APP_CIRCLE_MEDIUM_ERROR) {
+            base_speed = APP_CIRCLE_BASE_SPEED * APP_LINE_MEDIUM_SPEED_SCALE; // Slow earlier on medium errors.
+            steer_limit = APP_CIRCLE_STEER_LIMIT * 0.75f; // Moderate correction before the error becomes large.
+            min_steer = APP_LINE_MEDIUM_MIN_STEER; // Make medium-error correction visible on the chassis.
+        } else {
+            steer_limit = APP_CIRCLE_STEER_LIMIT * 0.45f; // Keep tiny corrections gentle near the center line.
         }
 
         if (line_error > 0) {
-            g_line_recover_direction = 1; // Remember that the last valid line was to the right of center.
+            g_line_recover_direction = 1; // Remember the last valid line side for short lost-line recovery.
         } else if (line_error < 0) {
-            g_line_recover_direction = -1; // Remember that the last valid line was to the left of center.
+            g_line_recover_direction = -1; // Remember the last valid line side for short lost-line recovery.
         }
 
-        if ((g_line_corner_mode == 0U) && (abs_error >= APP_LINE_CORNER_ENTER_ERROR)) {
-            if (g_line_corner_enter_count < APP_LINE_CORNER_ENTER_FRAMES) {
-                g_line_corner_enter_count++; // Debounce corner entry so one bad straight-line frame is ignored.
-            }
-        } else if (g_line_corner_mode == 0U) {
-            g_line_corner_enter_count = 0U; // Reset corner-entry debounce while normal steering is stable.
+        if ((min_steer > 0.0f) && (correction < min_steer) && (correction > -min_steer)) {
+            correction = (line_error > 0) ?
+                         (APP_CIRCLE_STEER_SIGN * min_steer) :
+                         (-APP_CIRCLE_STEER_SIGN * min_steer);
         }
 
-        if ((g_line_corner_mode == 0U) && (g_line_corner_enter_count >= APP_LINE_CORNER_ENTER_FRAMES)) {
-            g_line_corner_mode = 1U; // Treat a far-edge line as an upcoming square-map corner.
-            g_line_corner_count = 0U; // Start a fresh corner recovery window.
-            g_line_corner_enter_count = 0U; // Clear entry debounce after the corner state is latched.
-            g_line_corner_exit_count = 0U; // Clear exit debounce when a new corner starts.
-            g_line_corner_direction = APP_LINE_CORNER_DIRECTION; // Use the fixed counterclockwise corner direction instead of a noisy CCD guess.
-        }
-        if ((g_line_corner_mode != 0U) &&
-            (g_line_corner_count >= APP_LINE_CORNER_MIN_COUNT) &&
-            (abs_error <= APP_LINE_CORNER_EXIT_ERROR)) {
-            if (g_line_corner_exit_count < APP_LINE_CORNER_EXIT_FRAMES) {
-                g_line_corner_exit_count++; // Require several stable centered frames before leaving corner mode.
-            }
-        } else if (g_line_corner_mode != 0U) {
-            g_line_corner_exit_count = 0U; // Reset exit debounce while the corner target is still unstable.
-        }
-        if ((g_line_corner_mode != 0U) &&
-            (g_line_corner_exit_count >= APP_LINE_CORNER_EXIT_FRAMES)) {
-            g_line_corner_mode = 0U; // Return to normal PD steering once the line is centered again.
-            g_line_corner_count = 0U; // Clear the corner timer after a successful recovery.
-            g_line_corner_enter_count = 0U; // Clear entry debounce after leaving corner mode.
-            g_line_corner_exit_count = 0U; // Clear exit debounce after leaving corner mode.
-            g_line_last_error = line_error; // Reset derivative history at corner exit to avoid a post-turn kick.
-        }
+        correction = App_LimitFloat(correction, steer_limit);
+        correction = App_LimitFloatDelta(correction,
+                                         g_line_last_correction,
+                                         APP_LINE_CORRECTION_SLEW_LIMIT);
+        left_cmd = base_speed + correction;
+        right_cmd = base_speed - correction;
+        Bsp_Motor_Set(left_cmd, right_cmd);
 
-        if (g_line_corner_mode != 0U) {
-            float corner_turn;
-            float left_cmd;
-            float right_cmd;
-
-            if (g_line_corner_direction == 0) {
-                g_line_corner_direction = APP_LINE_CORNER_DIRECTION; // Keep square-map turns fixed to counterclockwise direction.
-            }
-            corner_turn = APP_LINE_CORNER_TURN * (float) g_line_corner_direction;
-            left_cmd = APP_LINE_CORNER_SPEED + corner_turn;
-            right_cmd = APP_LINE_CORNER_SPEED - corner_turn;
-            if (g_line_corner_count < APP_LINE_CORNER_MAX_COUNT) {
-                g_line_corner_count++; // Track active corner duration so a bad detection cannot drive forever.
-            }
-            Bsp_Motor_Set(left_cmd, right_cmd);
-            g_line_valid = 1U; // Mirror drive state for Watch/Expressions.
-            g_line_lost_count = 0U; // Clear lost-line debounce after a valid CCD target.
-            g_line_target = Bsp_Ccd_GetTargetIndex(); // Mirror target for Watch/Expressions.
-            g_line_error = line_error; // Mirror fixed-center error for Watch/Expressions.
-            g_line_error_delta = error_delta; // Mirror derivative input for Watch/Expressions.
-            g_line_dx_max = Bsp_Ccd_GetDxMax(); // Mirror strongest positive edge for Watch/Expressions.
-            g_line_dx_min = Bsp_Ccd_GetDxMin(); // Mirror strongest negative edge for Watch/Expressions.
-            g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Mirror positive-edge index for Watch/Expressions.
-            g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Mirror negative-edge index for Watch/Expressions.
-            g_line_correction = corner_turn; // Mirror the forced corner turn for tuning.
-            g_line_left_cmd = left_cmd; // Mirror left command for Watch/Expressions.
-            g_line_right_cmd = right_cmd; // Mirror right command for Watch/Expressions.
-            g_line_last_error = line_error; // Store the current error for the next derivative update.
-        } else if (abs_error >= APP_LINE_LARGE_ERROR) {
-            base_speed = APP_LINE_BASE_SPEED * 0.78f; // Slow down on large errors so steering has time to recover.
-            steer_limit = APP_LINE_STEER_LIMIT; // Keep the full steering authority for clear recovery turns.
-            correction = App_LimitFloat(correction, steer_limit);
-            float left_cmd = base_speed + correction; // Positive error means line is right, so left wheel speeds up.
-            float right_cmd = base_speed - correction; // Positive error means line is right, so right wheel slows down.
-            Bsp_Motor_Set(left_cmd, right_cmd);
-            g_line_valid = 1U; // Mirror drive state for Watch/Expressions.
-            g_line_lost_count = 0U; // Clear lost-line debounce after a valid CCD target.
-            g_line_target = Bsp_Ccd_GetTargetIndex(); // Mirror target for Watch/Expressions.
-            g_line_error = line_error; // Mirror fixed-center error for Watch/Expressions.
-            g_line_error_delta = error_delta; // Mirror derivative input for Watch/Expressions.
-            g_line_dx_max = Bsp_Ccd_GetDxMax(); // Mirror strongest positive edge for Watch/Expressions.
-            g_line_dx_min = Bsp_Ccd_GetDxMin(); // Mirror strongest negative edge for Watch/Expressions.
-            g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Mirror positive-edge index for Watch/Expressions.
-            g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Mirror negative-edge index for Watch/Expressions.
-            g_line_correction = correction; // Mirror the limited steering correction for tuning.
-            g_line_left_cmd = left_cmd; // Mirror left command for Watch/Expressions.
-            g_line_right_cmd = right_cmd; // Mirror right command for Watch/Expressions.
-            g_line_last_error = line_error; // Store the current error for the next derivative update.
-        } else {
-            if (abs_error >= APP_LINE_MEDIUM_ERROR) {
-                base_speed = APP_LINE_BASE_SPEED * 0.88f; // Slightly slow down on medium errors like the STM32 reference code.
-                steer_limit = APP_LINE_STEER_LIMIT * 0.75f; // Use moderate steering before the error becomes large.
-            } else {
-                steer_limit = APP_LINE_STEER_LIMIT * 0.45f; // Keep tiny errors calm around the center line.
-            }
-
-            correction = App_LimitFloat(correction, steer_limit);
-            float left_cmd = base_speed + correction; // Positive error means line is right, so left wheel speeds up.
-            float right_cmd = base_speed - correction; // Positive error means line is right, so right wheel slows down.
-            Bsp_Motor_Set(left_cmd, right_cmd);
-            g_line_valid = 1U; // Mirror drive state for Watch/Expressions.
-            g_line_lost_count = 0U; // Clear lost-line debounce after a valid CCD target.
-            g_line_target = Bsp_Ccd_GetTargetIndex(); // Mirror target for Watch/Expressions.
-            g_line_error = line_error; // Mirror fixed-center error for Watch/Expressions.
-            g_line_error_delta = error_delta; // Mirror derivative input for Watch/Expressions.
-            g_line_dx_max = Bsp_Ccd_GetDxMax(); // Mirror strongest positive edge for Watch/Expressions.
-            g_line_dx_min = Bsp_Ccd_GetDxMin(); // Mirror strongest negative edge for Watch/Expressions.
-            g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Mirror positive-edge index for Watch/Expressions.
-            g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Mirror negative-edge index for Watch/Expressions.
-            g_line_correction = correction; // Mirror the limited steering correction for tuning.
-            g_line_left_cmd = left_cmd; // Mirror left command for Watch/Expressions.
-            g_line_right_cmd = right_cmd; // Mirror right command for Watch/Expressions.
-            g_line_last_error = line_error; // Store the current error for the next derivative update.
-        }
+        g_line_valid = 1U; // Mirror drive state for Watch/Expressions.
+        g_line_lost_count = 0U; // Reset the simple CCD lost-line recovery counter after a valid target.
+        g_line_target = Bsp_Ccd_GetTargetIndex(); // Mirror CCD target for Watch/Expressions.
+        g_line_error = line_error; // Mirror fixed-center error for Watch/Expressions.
+        g_line_error_delta = error_delta; // Mirror derivative input for Watch/Expressions.
+        g_line_dx_max = Bsp_Ccd_GetDxMax(); // Mirror strongest positive edge for Watch/Expressions.
+        g_line_dx_min = Bsp_Ccd_GetDxMin(); // Mirror strongest negative edge for Watch/Expressions.
+        g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Mirror positive-edge index for Watch/Expressions.
+        g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Mirror negative-edge index for Watch/Expressions.
+        g_line_correction = correction; // Mirror limited CCD steering correction.
+        g_line_left_cmd = left_cmd; // Mirror left command for Watch/Expressions.
+        g_line_right_cmd = right_cmd; // Mirror right command for Watch/Expressions.
+        g_line_last_error = line_error; // Store current error for the next derivative update.
+        g_line_last_correction = correction; // Store smoothed steering for the next slew-limit step.
     } else {
-        int16_t abs_last_error = (g_line_last_error < 0) ? (int16_t) (-g_line_last_error) : g_line_last_error; // Use the last valid offset to classify target loss.
+        float left_cmd = 0.0f;
+        float right_cmd = 0.0f;
+        float correction = 0.0f;
 
-        if ((g_line_corner_mode == 0U) &&
-            (g_line_recover_direction != 0) &&
-            (abs_last_error >= APP_LINE_CORNER_LOST_ERROR) &&
-            (g_line_lost_count >= APP_LINE_CORNER_LOST_FRAMES)) {
-            g_line_corner_mode = 1U; // Promote target loss near one side of the CCD into square-map corner mode.
-            g_line_corner_count = 0U; // Start a fresh bounded corner recovery window from the lost-line event.
-            g_line_corner_enter_count = 0U; // Clear valid-frame debounce because the corner was detected from target loss.
-            g_line_corner_exit_count = 0U; // Clear exit debounce when target-loss corner recovery starts.
-            g_line_corner_direction = APP_LINE_CORNER_DIRECTION; // Use the fixed counterclockwise corner direction after target loss.
-        }
+        if ((g_line_lost_count < APP_LINE_LOST_RECOVER_MAX) &&
+            (g_line_recover_direction != 0)) {
+            float base_speed = APP_CIRCLE_BASE_SPEED * APP_LINE_LOST_SPEED_SCALE;
 
-        if ((g_line_corner_mode != 0U) && (g_line_corner_count < APP_LINE_CORNER_MAX_COUNT)) {
-            float corner_turn = APP_LINE_CORNER_TURN * (float) g_line_corner_direction;
-            float left_cmd = APP_LINE_CORNER_SPEED + corner_turn;
-            float right_cmd = APP_LINE_CORNER_SPEED - corner_turn;
-
-            g_line_lost_count++; // Count missing CCD targets while forcing the corner turn.
-            g_line_corner_count++; // Keep the corner recovery bounded even if the line is temporarily invisible.
-            Bsp_Motor_Set(left_cmd, right_cmd); // Continue the 90-degree corner turn through short target-loss gaps.
-            g_line_left_cmd = left_cmd; // Mirror corner lost-line left command for Watch/Expressions.
-            g_line_right_cmd = right_cmd; // Mirror corner lost-line right command for Watch/Expressions.
-            g_line_correction = corner_turn; // Mirror the fixed corner turn for Watch/Expressions.
-        } else if (g_line_lost_count < APP_LINE_LOST_RECOVER_MAX) {
-            float recovery_speed = APP_LINE_BASE_SPEED * APP_LINE_LOST_SPEED_SCALE;
-            float recovery_turn = APP_LINE_LOST_TURN * (float) g_line_recover_direction;
-            float left_cmd = recovery_speed + recovery_turn;
-            float right_cmd = recovery_speed - recovery_turn;
-
-            g_line_lost_count++; // Count consecutive missing CCD targets during recovery.
-            Bsp_Motor_Set(left_cmd, right_cmd); // Keep turning toward the last valid line direction instead of driving straight away.
-            g_line_left_cmd = left_cmd; // Mirror lost-line recovery left command for Watch/Expressions.
-            g_line_right_cmd = right_cmd; // Mirror lost-line recovery right command for Watch/Expressions.
-            g_line_correction = recovery_turn; // Mirror the fixed recovery turn for Watch/Expressions.
+            correction = APP_CIRCLE_STEER_SIGN *
+                         APP_LINE_LOST_TURN *
+                         (float) g_line_recover_direction;
+            correction = App_LimitFloatDelta(correction,
+                                             g_line_last_correction,
+                                             APP_LINE_CORRECTION_SLEW_LIMIT);
+            left_cmd = base_speed + correction;
+            right_cmd = base_speed - correction;
+            Bsp_Motor_Set(left_cmd, right_cmd); // Search toward the last valid line side instead of coasting straight out.
         } else {
-            Bsp_Motor_Stop(); // Stop only after repeated CCD target loss.
-            g_line_left_cmd = 0.0f; // Mirror stopped left command for Watch/Expressions.
-            g_line_right_cmd = 0.0f; // Mirror stopped right command for Watch/Expressions.
-            g_line_correction = 0.0f; // Mirror stopped correction for Watch/Expressions.
-            g_line_corner_mode = 0U; // Clear corner mode after a bounded recovery fails.
-            g_line_corner_count = 0U; // Reset the corner timer after stopping.
-            g_line_corner_enter_count = 0U; // Reset corner-entry debounce after stopping.
-            g_line_corner_exit_count = 0U; // Reset corner-exit debounce after stopping.
+            Bsp_Motor_Stop(); // Stop only after repeated target loss.
         }
         g_line_valid = 0U; // Mirror lost-line state for Watch/Expressions.
+        g_line_lost_count++; // Count consecutive missing CCD targets for debugging only.
         g_line_target = -1; // Mirror lost-line target for Watch/Expressions.
-        g_line_error = g_line_last_error; // Keep the last valid error visible while recovering from target loss.
-        g_line_error_delta = 0; // Clear derivative display while no valid target is available.
-        g_line_dx_max = Bsp_Ccd_GetDxMax(); // Keep last edge strength visible even when the line is rejected.
-        g_line_dx_min = Bsp_Ccd_GetDxMin(); // Keep last edge strength visible even when the line is rejected.
-        g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Keep last edge index visible even when the line is rejected.
-        g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Keep last edge index visible even when the line is rejected.
+        g_line_error = g_line_last_error; // Keep last valid error visible while bridging a short target dropout.
+        g_line_error_delta = 0; // Clear derivative display while no target is available.
+        g_line_dx_max = Bsp_Ccd_GetDxMax(); // Keep edge diagnostics visible when invalid.
+        g_line_dx_min = Bsp_Ccd_GetDxMin(); // Keep edge diagnostics visible when invalid.
+        g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Keep edge diagnostics visible when invalid.
+        g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Keep edge diagnostics visible when invalid.
+        g_line_correction = correction; // Mirror held steering correction during short target dropouts.
+        g_line_left_cmd = left_cmd; // Mirror lost-line straight/stop command.
+        g_line_right_cmd = right_cmd; // Mirror lost-line straight/stop command.
+        g_line_last_correction = correction; // Keep lost-line recovery continuous with valid steering.
     }
-    Bsp_Gpio_UpdateCornerIndicator(g_line_corner_mode); // Blink the red LED only while the square-map corner mode is active.
-    delay_cycles(APP_LINE_LOOP_DELAY);
+    Bsp_Gpio_ToggleHeartbeat(); // Heartbeat confirms the CCD line-follow loop is running.
+    delay_cycles(APP_CIRCLE_LOOP_DELAY);
 #elif APP_MODE == APP_MODE_CCD_STRAIGHT
     Bsp_Ccd_ReadFrame(); // Capture the latest line position before straight-only gating.
     Bsp_Ccd_Process(); // Detect whether a valid black line exists without using error for steering.

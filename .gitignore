@@ -11,5 +11,9 @@
 
 # 个人 Claude Code 指令
 CLAUDE.md
+AGENTS.md
 
-TICar/ticlang/.exclude
+TICar/ticlang/
+TICar/0713code_analysis.md
+TICar/0713code_analysis.pdf
+TICar/0713debug.md

@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define BSP_CCD_PIXEL_COUNT 128U
-#define BSP_CCD_CENTER_INDEX 68 // Current optical center measured from the lit CCD map test.
+#define BSP_CCD_CENTER_INDEX 63 // Match the 2025 CCD line-follow target center.
 
 void Bsp_Ccd_Init(void);
 void Bsp_Ccd_ReadFrame(void);

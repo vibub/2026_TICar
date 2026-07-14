@@ -10,8 +10,8 @@
     </applicability>
 
     <project
-        title="26TICup_MSPM0_Bringup"
-        name="26TICup_MSPM0_Bringup"
+        title="TICar"
+        name="TICar"
         configurations="Debug"
         toolChain="TICLANG"
         connection="TIXDS110_Connection.xml"

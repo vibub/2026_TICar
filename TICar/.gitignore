@@ -39,3 +39,6 @@ Thumbs.db
 **/Obj/*.pbd.*
 **/Obj/*.pbi
 **/Obj/*.pbi.*
+
+# 本机工作区
+/*.theia-workspace

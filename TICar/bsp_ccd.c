@@ -7,8 +7,9 @@
 
 #define BSP_CCD_ADC_DONE_MASK DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED
 #define BSP_CCD_ADC_WAIT_TIMEOUT 10000U
-#define BSP_CCD_TARGET_MIN_EDGE_GAP 10
+#define BSP_CCD_TARGET_MIN_EDGE_GAP 10U
 #define BSP_CCD_MIN_CONTRAST 80U
+#define BSP_CCD_WEAK_EDGE_DELTA 25
 #define BSP_CCD_MIN_BLACK_WIDTH 3U
 #define BSP_CCD_IGNORE_EDGE_PIXELS 16U
 #define BSP_CCD_THRESHOLD_NUMERATOR 45U
@@ -33,6 +34,8 @@ static uint16_t g_ccd_contrast = 0U;
 static uint16_t g_ccd_black_width = 0U;
 static uint16_t g_ccd_raw_min_index = 0U;
 static uint16_t g_ccd_raw_max_index = 0U;
+static int16_t g_ccd_last_valid_target = BSP_CCD_CENTER_INDEX;
+static uint8_t g_ccd_has_last_valid_target = 0U;
 
 static void Ccd_DelayUs(uint16_t us)
 {
@@ -188,13 +191,7 @@ void Bsp_Ccd_ReadFrame(void)
 void Bsp_Ccd_Process(void)
 {
     uint16_t i;
-    uint16_t max_idx = 0U;
-    uint16_t min_idx = 0U;
     uint16_t contrast;
-    uint16_t run_start = 0U;
-    uint16_t run_len = 0U;
-    uint16_t best_start = 0U;
-    uint16_t best_len = 0U;
 
     for (i = 0U; i < BSP_CCD_PIXEL_COUNT; i++) {
         uint16_t left = (i == 0U) ? g_ccd_raw[i] : g_ccd_raw[i - 1U];
@@ -228,56 +225,42 @@ void Bsp_Ccd_Process(void)
     g_ccd_dx_max_index = 0U;
     g_ccd_dx_min_index = 0U;
     for (i = 0U; i < (BSP_CCD_PIXEL_COUNT - 3U); i++) {
-        g_ccd_dx[i] = (int16_t) g_ccd_filtered[i] - (int16_t) g_ccd_filtered[i + 3U]; // Edge detector copied from 2025 code.
+        g_ccd_dx[i] = (int16_t) g_ccd_filtered[i] - (int16_t) g_ccd_filtered[i + 3U]; // 2025 CCD algorithm: compare each pixel with the sample three positions ahead.
         if (g_ccd_dx[i] > g_ccd_dx_max) {
             g_ccd_dx_max = g_ccd_dx[i];
-            max_idx = i;
             g_ccd_dx_max_index = i; // Mirror 2025 MaxIdx for debugger inspection.
         }
         if (g_ccd_dx[i] < g_ccd_dx_min) {
             g_ccd_dx_min = g_ccd_dx[i];
-            min_idx = i;
             g_ccd_dx_min_index = i; // Mirror 2025 MinIdx for debugger inspection.
         }
     }
 
-    for (i = BSP_CCD_IGNORE_EDGE_PIXELS; i < (BSP_CCD_PIXEL_COUNT - BSP_CCD_IGNORE_EDGE_PIXELS); i++) {
-        if ((contrast >= BSP_CCD_MIN_CONTRAST) && (g_ccd_filtered[i] <= g_ccd_threshold)) {
-            if (run_len == 0U) {
-                run_start = i; // Start a continuous dark-pixel run.
-            }
-            run_len++;
-        } else {
-            if (run_len > best_len) {
-                best_start = run_start; // Keep the widest dark run as the black-line candidate.
-                best_len = run_len;
-            }
-            run_len = 0U;
-        }
-    }
-    if (run_len > best_len) {
-        best_start = run_start; // Handle a dark run that reaches the last CCD pixel.
-        best_len = run_len;
-    }
-
-    if (best_len >= BSP_CCD_MIN_BLACK_WIDTH) {
-        g_ccd_black_width = best_len; // Keep dark-run width as debug information, not as the target source.
-        g_ccd_black_left = (int16_t) best_start; // Keep dark-run left edge for Watch/Expressions.
-        g_ccd_black_right = (int16_t) (best_start + best_len - 1U); // Keep dark-run right edge for Watch/Expressions.
-    } else {
-        g_ccd_black_width = 0U; // No reliable dark run found for debug display.
-        g_ccd_black_left = -1; // Mark debug dark-run edge invalid.
-        g_ccd_black_right = -1; // Mark debug dark-run edge invalid.
-    }
-
-    if ((g_ccd_dx_max > 0) &&
-        (g_ccd_dx_min < 0) &&
-        (((int16_t) min_idx - (int16_t) max_idx) > BSP_CCD_TARGET_MIN_EDGE_GAP)) {
+    if ((g_ccd_dx_max_index < g_ccd_dx_min_index) &&
+        ((g_ccd_dx_min_index - g_ccd_dx_max_index) > BSP_CCD_TARGET_MIN_EDGE_GAP) &&
+        (g_ccd_dx_max > 0) &&
+        (g_ccd_dx_min < 0)) {
         g_ccd_line_valid = 1U;
-        g_ccd_target_index = (int16_t) ((max_idx + min_idx) >> 1U); // Match 2025 code: center is midpoint of strongest falling/rising edges.
+        g_ccd_black_width = g_ccd_dx_min_index - g_ccd_dx_max_index + 1U;
+        g_ccd_black_left = (int16_t) g_ccd_dx_max_index;
+        g_ccd_black_right = (int16_t) g_ccd_dx_min_index;
+        g_ccd_target_index = (int16_t) ((g_ccd_dx_max_index + g_ccd_dx_min_index) >> 1U); // Match 2025: center is midpoint of strongest positive/negative edges.
+        g_ccd_last_valid_target = g_ccd_target_index;
+        g_ccd_has_last_valid_target = 1U;
         g_ccd_line_error = g_ccd_target_index - BSP_CCD_CENTER_INDEX; // Positive error means the detected line is to the right.
+    } else if (((g_ccd_dx_max - g_ccd_dx_min) < BSP_CCD_WEAK_EDGE_DELTA) &&
+               (g_ccd_has_last_valid_target != 0U)) {
+        g_ccd_line_valid = 1U;
+        g_ccd_black_width = 0U;
+        g_ccd_black_left = -1;
+        g_ccd_black_right = -1;
+        g_ccd_target_index = g_ccd_last_valid_target; // STM32-style continuity: keep last reliable center through weak CCD frames.
+        g_ccd_line_error = g_ccd_target_index - BSP_CCD_CENTER_INDEX;
     } else {
         g_ccd_line_valid = 0U;
+        g_ccd_black_width = 0U;
+        g_ccd_black_left = -1;
+        g_ccd_black_right = -1;
         g_ccd_target_index = -1; // -1 means no reliable black line was detected.
         g_ccd_line_error = 0;
     }

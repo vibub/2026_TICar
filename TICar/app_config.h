@@ -11,7 +11,8 @@
 #define APP_MODE_CCD_STRAIGHT 8
 #define APP_MODE_ENCODER_WATCH 9
 #define APP_MODE_SPEED_TEST 10
+#define APP_MODE_CIRCLE_FOLLOW 11
 
-#define APP_MODE APP_MODE_LINE_FOLLOW // Run CCD line-follow mode after left/right motor mapping has been verified.
+#define APP_MODE APP_MODE_CIRCLE_FOLLOW // Run the single CCD line-follow controller.
 
 #endif
