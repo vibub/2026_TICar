@@ -18,15 +18,15 @@
 #define APP_MOTOR_TEST_FAST_SPEED 0.45f // Fast wheel command for visible left/right mapping checks.
 #define APP_CCD_PRINT_DELAY (CPUCLK_FREQ / 2U) // Print CCD frames at 2 Hz so UART output stays readable.
 #define APP_CCD_LOG_FRAME_COUNT 32U // Keep a small RAM log that can be exported through the debugger.
-#define APP_LINE_BASE_SPEED 0.19f // Back off half a step from 0.20 while bend stability is being tuned.
+#define APP_LINE_BASE_SPEED 0.35f // Track-tested straight speed for the frozen line-follow baseline.
 #define APP_LINE_KP 0.0025f // STM32-style PD proportional gain for visible recovery in bends.
 #define APP_LINE_KD 0.0005f // Smaller derivative reduces correction flips from CCD target jitter.
 #define APP_LINE_STEER_LIMIT 0.130f // Stronger bend steering without direction lock.
 #define APP_LINE_MEDIUM_MIN_STEER 0.020f // Keep medium-error correction from kicking the car on straights.
 #define APP_LINE_LARGE_MIN_STEER 0.090f // Minimum recovery correction in bends before leaving the track.
-#define APP_LINE_CORRECTION_SLEW_LIMIT 0.025f // Limit per-frame steering jumps to reduce weaving through bends.
-#define APP_LINE_MEDIUM_SPEED_SCALE 0.75f // Slow earlier in bends so steering has time to work.
-#define APP_LINE_LARGE_SPEED_SCALE 0.45f // Slow aggressively in large-error bend recovery.
+#define APP_LINE_CORRECTION_SLEW_LIMIT 0.035f // Track-tested response rate that recovers cleanly when leaving bends.
+#define APP_LINE_MEDIUM_SPEED_SCALE 0.65f // Medium-error speed is about 0.228 at the 0.35 baseline.
+#define APP_LINE_LARGE_SPEED_SCALE 0.39f // Large-error speed is about 0.137 at the 0.35 baseline.
 #define APP_LINE_DEADBAND_ERROR 5 // Keep center-line jitter from causing visible dithering.
 #define APP_LINE_MEDIUM_ERROR 6 // Start reducing base speed after a small but visible CCD offset.
 #define APP_LINE_LARGE_ERROR 12 // Treat larger CCD pixel errors as a clear recovery condition.
