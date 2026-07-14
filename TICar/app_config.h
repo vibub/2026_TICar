@@ -8,7 +8,10 @@
 #define APP_MODE_UART_TEST 5
 #define APP_MODE_CCD_WATCH 6
 #define APP_MODE_LINE_FOLLOW 7
+#define APP_MODE_CCD_STRAIGHT 8
+#define APP_MODE_ENCODER_WATCH 9
+#define APP_MODE_SPEED_TEST 10
 
-#define APP_MODE APP_MODE_LINE_FOLLOW
+#define APP_MODE APP_MODE_LINE_FOLLOW // Run CCD line-follow mode after left/right motor mapping has been verified.
 
 #endif

@@ -25,5 +25,9 @@ uint16_t Bsp_Ccd_GetContrast(void);
 uint16_t Bsp_Ccd_GetBlackWidth(void);
 uint16_t Bsp_Ccd_GetRawMinIndex(void);
 uint16_t Bsp_Ccd_GetRawMaxIndex(void);
+int16_t Bsp_Ccd_GetDxMax(void);
+int16_t Bsp_Ccd_GetDxMin(void);
+uint16_t Bsp_Ccd_GetDxMaxIndex(void);
+uint16_t Bsp_Ccd_GetDxMinIndex(void);
 
 #endif
