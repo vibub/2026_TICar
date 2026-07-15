@@ -15,10 +15,14 @@
  */
 const ADC12  = scripting.addModule("/ti/driverlib/ADC12", {}, false);
 const ADC121 = ADC12.addInstance();
+const COMPARE  = scripting.addModule("/ti/driverlib/COMPARE", {}, false);
+const COMPARE1 = COMPARE.addInstance();
+const COMPARE2 = COMPARE.addInstance();
 const GPIO   = scripting.addModule("/ti/driverlib/GPIO", {}, false);
 const GPIO1  = GPIO.addInstance();
 const GPIO2  = GPIO.addInstance();
 const GPIO3  = GPIO.addInstance();
+const GPIO4  = GPIO.addInstance();
 const PWM    = scripting.addModule("/ti/driverlib/PWM", {}, false);
 const PWM1   = PWM.addInstance();
 const PWM2   = PWM.addInstance();
@@ -40,6 +44,22 @@ ADC121.adcPin0Config.$name        = "ti_driverlib_gpio_GPIOPinGeneric5";
 
 const Board = scripting.addModule("/ti/driverlib/Board", {}, false);
 
+COMPARE1.$name                      = "COMPARE_0";
+COMPARE1.filteringMode              = "VOTING";
+COMPARE1.compareMode                = "EDGE_COUNT_UP";
+COMPARE1.interrupts                 = ["LOAD"];
+COMPARE1.timerPeriod                = 10;
+COMPARE1.peripheral.ccp0Pin.$assign = "PB13";
+COMPARE1.ccp0PinConfig.$name        = "ti_driverlib_gpio_GPIOPinGeneric6";
+
+COMPARE2.$name                      = "COMPARE_1";
+COMPARE2.filteringMode              = "VOTING";
+COMPARE2.compareMode                = "EDGE_COUNT_UP";
+COMPARE2.interrupts                 = ["LOAD"];
+COMPARE2.timerPeriod                = 10;
+COMPARE2.peripheral.ccp0Pin.$assign = "PB15";
+COMPARE2.ccp0PinConfig.$name        = "ti_driverlib_gpio_GPIOPinGeneric7";
+
 GPIO1.$name                         = "GPIO_LEDS";
 GPIO1.port                          = "PORTB";
 GPIO1.associatedPins[0].$name       = "USER_LED_1";
@@ -59,6 +79,22 @@ GPIO3.associatedPins[0].$name       = "SI";
 GPIO3.associatedPins[0].pin.$assign = "PA25";
 GPIO3.associatedPins[1].$name       = "CLK";
 GPIO3.associatedPins[1].pin.$assign = "PB23";
+
+GPIO4.$name                               = "GPIO_ENCODER";
+GPIO4.port                                = "PORTB";
+GPIO4.associatedPins.create(2);
+GPIO4.associatedPins[0].$name             = "PIN_1B";
+GPIO4.associatedPins[0].direction         = "INPUT";
+GPIO4.associatedPins[0].inputFilter       = "8_CYCLES";
+GPIO4.associatedPins[0].internalResistor  = "PULL_UP";
+GPIO4.associatedPins[0].ioStructure       = "SD";
+GPIO4.associatedPins[0].pin.$assign       = "PB20";
+GPIO4.associatedPins[1].$name             = "PIN_2B";
+GPIO4.associatedPins[1].direction         = "INPUT";
+GPIO4.associatedPins[1].inputFilter       = "8_CYCLES";
+GPIO4.associatedPins[1].internalResistor  = "PULL_UP";
+GPIO4.associatedPins[1].ioStructure       = "SD";
+GPIO4.associatedPins[1].pin.$assign       = "PB17";
 
 PWM1.$name                              = "PWM_DC";
 PWM1.timerCount                         = 10000;
