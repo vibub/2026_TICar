@@ -52,15 +52,31 @@
 #define APP_SPEED_TEST_WARMUP_LOOPS 250U // Hold zero PWM for five seconds so the stationary phase is obvious.
 #define APP_SPEED_TEST_HOLD_LOOPS 250U // Hold each 2025-style speed target for five seconds.
 #define APP_SPEED_TEST_LOOP_DELAY (CPUCLK_FREQ / 50U) // Run speed PID around 50 Hz like the line-follow loop.
+#define APP_K230_FOLLOW_KP_NUM 8 // Integer P numerator: 8 / 100 = 0.08 compare per pixel.
+#define APP_K230_FOLLOW_KP_DEN 100
+#define APP_K230_FOLLOW_X_DEADBAND 10 // Ignore small horizontal target jitter around the image center.
+#define APP_K230_FOLLOW_Y_DEADBAND 8 // Ignore small vertical target jitter around the image center.
+#define APP_K230_FOLLOW_PAN_MAX_STEP 20 // Limit Pan movement produced by one new K230 frame.
+#define APP_K230_FOLLOW_TILT_MAX_STEP 15 // Limit Tilt movement produced by one new K230 frame.
+#define APP_K230_FOLLOW_PAN_DIRECTION (-1) // Positive error_x initially commands a lower Pan compare.
+#define APP_K230_FOLLOW_TILT_DIRECTION 1 // Positive error_y initially commands a higher Tilt compare.
+#define APP_K230_FOLLOW_STATE_WAIT_LINK 0U
+#define APP_K230_FOLLOW_STATE_TRACKING 1U
+#define APP_K230_FOLLOW_STATE_HOLD 2U
+#define APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED 3U
 
 volatile uint32_t g_app_debug_mode = 0U; // Watch this value to confirm the running firmware writes the selected APP_MODE.
 
 #if APP_MODE == APP_MODE_K230_FOLLOW
 static uint32_t g_k230_follow_seen_timeout_count;
-#endif
-
-#if APP_MODE == APP_MODE_K230_FOLLOW
-static uint32_t g_k230_follow_seen_timeout_count;
+volatile int16_t g_k230_control_error_x = 0; // Watch the horizontal error after validity and deadband filtering.
+volatile int16_t g_k230_control_error_y = 0; // Watch the vertical error after validity and deadband filtering.
+volatile int16_t g_k230_pan_delta = 0; // Watch the actual Pan compare change applied for the latest valid target frame.
+volatile int16_t g_k230_tilt_delta = 0; // Watch the actual Tilt compare change applied for the latest valid target frame.
+volatile uint16_t g_k230_pan_compare = BSP_PTZ_PAN_CENTER; // Watch the current Pan command sent to the BSP.
+volatile uint16_t g_k230_tilt_compare = BSP_PTZ_TILT_CENTER; // Watch the current Tilt command sent to the BSP.
+volatile uint8_t g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK; // 0 wait, 1 tracking, 2 hold, 3 timeout-disabled.
+volatile uint32_t g_k230_follow_update_count = 0U; // Count valid target frames consumed by the controller.
 #endif
 
 #if (APP_MODE == APP_MODE_ENCODER_WATCH) || (APP_MODE == APP_MODE_SPEED_TEST) || \
@@ -280,6 +296,120 @@ static void App_UpdateCcdWatchData(void)
 }
 #endif
 
+#if APP_MODE == APP_MODE_K230_FOLLOW
+static int32_t App_K230Follow_LimitInt32(int32_t value, int32_t minimum, int32_t maximum)
+{
+    if (value < minimum) {
+        return minimum;
+    }
+    if (value > maximum) {
+        return maximum;
+    }
+    return value;
+}
+
+static int16_t App_K230Follow_FilterError(int16_t error, int16_t deadband)
+{
+    if ((error >= -deadband) && (error <= deadband)) {
+        return 0;
+    }
+    return error;
+}
+
+static int16_t App_K230Follow_CalculateDelta(
+    int16_t error,
+    int8_t direction,
+    int16_t max_step)
+{
+    int32_t absolute_error = (error < 0) ? -(int32_t) error : (int32_t) error;
+    int32_t magnitude = ((absolute_error * APP_K230_FOLLOW_KP_NUM) +
+                         (APP_K230_FOLLOW_KP_DEN / 2)) /
+                        APP_K230_FOLLOW_KP_DEN;
+    int32_t delta = (error < 0) ? -magnitude : magnitude;
+
+    delta *= direction;
+    delta = App_K230Follow_LimitInt32(delta, -max_step, max_step);
+    return (int16_t) delta;
+}
+
+static void App_K230Follow_ProcessFrame(const K230_TargetFrame *frame)
+{
+    int16_t requested_pan_delta;
+    int16_t requested_tilt_delta;
+    int32_t next_pan;
+    int32_t next_tilt;
+    uint16_t previous_pan;
+    uint16_t previous_tilt;
+
+    if ((frame->detected == 0U) ||
+        (frame->confidence < K230_MIN_CONFIDENCE)) {
+        g_k230_control_error_x = 0;
+        g_k230_control_error_y = 0;
+        g_k230_pan_delta = 0;
+        g_k230_tilt_delta = 0;
+        g_k230_follow_state = APP_K230_FOLLOW_STATE_HOLD;
+        return; // A valid N or low-confidence T frame holds the last safe position.
+    }
+
+    g_k230_control_error_x = App_K230Follow_FilterError(
+        frame->error_x, APP_K230_FOLLOW_X_DEADBAND);
+    g_k230_control_error_y = App_K230Follow_FilterError(
+        frame->error_y, APP_K230_FOLLOW_Y_DEADBAND);
+    requested_pan_delta = App_K230Follow_CalculateDelta(
+        g_k230_control_error_x,
+        APP_K230_FOLLOW_PAN_DIRECTION,
+        APP_K230_FOLLOW_PAN_MAX_STEP);
+    requested_tilt_delta = App_K230Follow_CalculateDelta(
+        g_k230_control_error_y,
+        APP_K230_FOLLOW_TILT_DIRECTION,
+        APP_K230_FOLLOW_TILT_MAX_STEP);
+
+    previous_pan = g_k230_pan_compare;
+    previous_tilt = g_k230_tilt_compare;
+    next_pan = App_K230Follow_LimitInt32(
+        (int32_t) previous_pan + requested_pan_delta,
+        BSP_PTZ_PAN_MIN,
+        BSP_PTZ_PAN_MAX);
+    next_tilt = App_K230Follow_LimitInt32(
+        (int32_t) previous_tilt + requested_tilt_delta,
+        BSP_PTZ_TILT_MIN,
+        BSP_PTZ_TILT_MAX);
+
+    g_k230_pan_compare = (uint16_t) next_pan;
+    g_k230_tilt_compare = (uint16_t) next_tilt;
+    g_k230_pan_delta = (int16_t) (next_pan - previous_pan);
+    g_k230_tilt_delta = (int16_t) (next_tilt - previous_tilt);
+    Bsp_Ptz_SetCompare(g_k230_tilt_compare, g_k230_pan_compare);
+    g_k230_follow_state = APP_K230_FOLLOW_STATE_TRACKING;
+    g_k230_follow_update_count++;
+}
+
+static void App_K230Follow_Task(void)
+{
+    K230_TargetFrame frame;
+
+    if (g_k230_timeout_count != g_k230_follow_seen_timeout_count) {
+        g_k230_follow_seen_timeout_count = g_k230_timeout_count;
+        g_k230_control_error_x = 0;
+        g_k230_control_error_y = 0;
+        g_k230_pan_delta = 0;
+        g_k230_tilt_delta = 0;
+        Bsp_Ptz_Disable();
+        g_k230_follow_state = APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED;
+        return;
+    }
+
+    if (Protocol_K230_TakeLatestFrame(&frame) == 0U) {
+        return;
+    }
+    if (g_k230_follow_state == APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED) {
+        return; // Keep PWM disabled after a link timeout until the mode is restarted.
+    }
+
+    App_K230Follow_ProcessFrame(&frame);
+}
+#endif
+
 void App_Init(void)
 {
     g_app_debug_mode = APP_MODE; // Write the mode at runtime so CCS Watch can verify the loaded firmware.
@@ -293,6 +423,14 @@ void App_Init(void)
 #if APP_MODE == APP_MODE_K230_FOLLOW
     Bsp_Ptz_Init(); // Load safe center compare values before the first servo PWM frame.
     Bsp_Ptz_Start(); // Only the K230 follow mode enables the dual-axis servo output.
+    g_k230_control_error_x = 0;
+    g_k230_control_error_y = 0;
+    g_k230_pan_delta = 0;
+    g_k230_tilt_delta = 0;
+    g_k230_pan_compare = BSP_PTZ_PAN_CENTER;
+    g_k230_tilt_compare = BSP_PTZ_TILT_CENTER;
+    g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK;
+    g_k230_follow_update_count = 0U;
 #elif (APP_MODE != APP_MODE_UART_TEST) && (APP_MODE != APP_MODE_CCD_WATCH) && (APP_MODE != APP_MODE_K230_UART)
     Bsp_Ptz_Disable(); // Full SysConfig modes that do not use the PTZ must force both servo signals low.
 #endif
@@ -336,10 +474,7 @@ void App_Loop(void)
     Protocol_K230_Task();
 #elif APP_MODE == APP_MODE_K230_FOLLOW
     Protocol_K230_Task();
-    if (g_k230_timeout_count != g_k230_follow_seen_timeout_count) {
-        g_k230_follow_seen_timeout_count = g_k230_timeout_count;
-        Bsp_Ptz_Disable(); // A link timeout removes servo PWM until the mode is restarted.
-    }
+    App_K230Follow_Task(); // Consume each new target frame once and update the two servo commands.
 #elif APP_MODE == APP_MODE_MOTOR_PWM
     Bsp_Motor_Set(APP_MOTOR_TEST_SLOW_SPEED, APP_MOTOR_TEST_FAST_SPEED); // Right command is faster; the car should yaw left if mapping is correct.
     delay_cycles(APP_DELAY_2S);
