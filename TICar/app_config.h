@@ -12,6 +12,7 @@
 #define APP_MODE_ENCODER_WATCH 9
 #define APP_MODE_SPEED_TEST 10
 #define APP_MODE_CIRCLE_FOLLOW 11
+#define APP_MODE_K230_FOLLOW 12
 
 // #define APP_MODE APP_MODE_CIRCLE_FOLLOW // Run the single CCD line-follow controller.
 #define APP_MODE APP_MODE_K230_UART

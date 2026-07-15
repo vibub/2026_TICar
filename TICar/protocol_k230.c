@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "bsp_motor.h"
 #include "bsp_time.h"
 #include "bsp_uart.h"
 
@@ -199,7 +198,6 @@ void Protocol_K230_Task(void)
         g_k230_link_alive = 0U;
         g_k230_target_valid = 0U;
         g_k230_timeout_count++;
-        Bsp_Motor_Disable();
     }
 }
 

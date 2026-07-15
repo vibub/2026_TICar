@@ -18,6 +18,8 @@ static void Main_SafeDebugSysInit(void)
     DL_GPIO_initDigitalOutput(GPIO_DC_AIN2_IOMUX); // Force motor direction input low before the motor board is powered.
     DL_GPIO_initDigitalOutput(GPIO_PWM_DC_C0_IOMUX); // Hold PWM input as GPIO low instead of enabling timer PWM.
     DL_GPIO_initDigitalOutput(GPIO_PWM_DC_C1_IOMUX); // Hold PWM input as GPIO low instead of enabling timer PWM.
+    DL_GPIO_initDigitalOutput(GPIO_PWM_PTZ_C0_IOMUX); // Hold Tilt servo signal low without enabling TIMA1.
+    DL_GPIO_initDigitalOutput(GPIO_PWM_PTZ_C1_IOMUX); // Hold Pan servo signal low without enabling TIMA1.
     DL_GPIO_initDigitalOutput(GPIO_CCD_SI_IOMUX); // Keep CCD SI available without enabling motor PWM.
     DL_GPIO_initDigitalOutput(GPIO_CCD_CLK_IOMUX); // Keep CCD CLK available without enabling motor PWM.
 
@@ -27,6 +29,8 @@ static void Main_SafeDebugSysInit(void)
     DL_GPIO_enableOutput(GPIO_DC_PORT, GPIO_DC_AIN0_PIN | GPIO_DC_AIN2_PIN);
     DL_GPIO_clearPins(GPIO_PWM_DC_C0_PORT, GPIO_PWM_DC_C0_PIN | GPIO_PWM_DC_C1_PIN);
     DL_GPIO_enableOutput(GPIO_PWM_DC_C0_PORT, GPIO_PWM_DC_C0_PIN | GPIO_PWM_DC_C1_PIN);
+    DL_GPIO_clearPins(GPIO_PWM_PTZ_C0_PORT, GPIO_PWM_PTZ_C0_PIN | GPIO_PWM_PTZ_C1_PIN);
+    DL_GPIO_enableOutput(GPIO_PWM_PTZ_C0_PORT, GPIO_PWM_PTZ_C0_PIN | GPIO_PWM_PTZ_C1_PIN);
     DL_GPIO_clearPins(GPIO_CCD_SI_PORT, GPIO_CCD_SI_PIN);
     DL_GPIO_enableOutput(GPIO_CCD_SI_PORT, GPIO_CCD_SI_PIN);
     DL_GPIO_clearPins(GPIO_CCD_CLK_PORT, GPIO_CCD_CLK_PIN);
