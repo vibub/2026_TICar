@@ -13,7 +13,7 @@
 #define APP_MODE_SPEED_TEST 10
 #define APP_MODE_CIRCLE_FOLLOW 11
 
-// #define APP_MODE APP_MODE_CIRCLE_FOLLOW // Run the single CCD line-follow controller.
-#define APP_MODE APP_MODE_K230_UART
+// Phase 3: run the frozen CCD controller with the verified 2025 same-car wheel-speed loop.
+#define APP_MODE APP_MODE_CIRCLE_FOLLOW
 
 #endif

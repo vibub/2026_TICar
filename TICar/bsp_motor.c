@@ -1,35 +1,55 @@
 #include "bsp_motor.h"
 
 #include <stdint.h>
-#include "ti/driverlib/m0p/dl_interrupt.h"
 #include "ti_msp_dl_config.h"
 
 #define BSP_MOTOR_PWM_PERIOD 10000U
 #define BSP_MOTOR_MAX_RATIO  0.80f
-#define BSP_MOTOR_LEFT_DIR   -1.0f // New-left wheel uses the old-right channel, so positive command must run old-right reverse.
-#define BSP_MOTOR_RIGHT_DIR  -1.0f // New-right wheel uses the old-left channel, so positive command must run old-left reverse.
-#define BSP_MOTOR_LEFT_FORWARD_SCALE  1.00f // New-left forward uses old-right reverse trim.
-#define BSP_MOTOR_RIGHT_FORWARD_SCALE 0.85f // New-right forward uses old-left reverse trim.
-#define BSP_MOTOR_LEFT_REVERSE_SCALE  1.00f // New-left reverse uses old-right forward trim.
-#define BSP_MOTOR_RIGHT_REVERSE_SCALE 0.91f // New-right reverse uses old-left forward trim.
-#define BSP_MOTOR_ENCODER_OLD_LEFT_A_PIN DL_GPIO_PIN_13 // PB13 is the 2025-board old-left encoder A phase.
-#define BSP_MOTOR_ENCODER_OLD_RIGHT_A_PIN DL_GPIO_PIN_15 // PB15 is the 2025-board old-right encoder A phase.
-#define BSP_MOTOR_ENCODER_OLD_LEFT_B_PIN DL_GPIO_PIN_20 // PB20 is the 2025-board old-left encoder B phase.
-#define BSP_MOTOR_ENCODER_OLD_RIGHT_B_PIN DL_GPIO_PIN_17 // PB17 is the 2025-board old-right encoder B phase.
-#define BSP_MOTOR_ENCODER_A_MASK (BSP_MOTOR_ENCODER_OLD_LEFT_A_PIN | BSP_MOTOR_ENCODER_OLD_RIGHT_A_PIN) // Interrupt only on A phases.
-#define BSP_MOTOR_SPEED_PID_KP 0.012f // Convert encoder tick error into a PWM-ratio correction.
-#define BSP_MOTOR_SPEED_PID_KI 0.0012f // Add a small integral term to overcome low-speed friction.
-#define BSP_MOTOR_SPEED_PID_KD 0.0f // Keep derivative disabled until encoder tick noise is measured.
-#define BSP_MOTOR_SPEED_PID_KFF 0.025f // Feed-forward PWM ratio per encoder tick per sample.
-#define BSP_MOTOR_SPEED_PID_START 0.08f // Minimum PWM bias helps the wheel start before the PI term builds.
-#define BSP_MOTOR_SPEED_PID_INTEGRAL_LIMIT 80.0f // Bound integral so a stalled wheel cannot wind up indefinitely.
-#define BSP_MOTOR_SPEED_PID_OUTPUT_LIMIT 0.60f // Keep closed-loop speed tests slower than the open-loop hard limit.
+#define BSP_MOTOR_LEFT_DIR    1.0f // Positive logical command must drive the physical-left wheel forward.
+#define BSP_MOTOR_RIGHT_DIR   1.0f // Positive logical command must drive the physical-right wheel forward.
+#define BSP_MOTOR_LEFT_FORWARD_SCALE  1.00f // Keep the physical-left motor trim with that motor after the connector swap.
+#define BSP_MOTOR_RIGHT_FORWARD_SCALE 0.85f // Keep the physical-right motor trim with that motor after the connector swap.
+#define BSP_MOTOR_LEFT_REVERSE_SCALE  1.00f // Physical-left reverse trim.
+#define BSP_MOTOR_RIGHT_REVERSE_SCALE 0.91f // Physical-right reverse trim.
+#define BSP_MOTOR_ENCODER_WHEEL_DIAMETER_CM 6.5f // Same 65 mm wheel diameter used by the 2025 and STM32 projects.
+#define BSP_MOTOR_ENCODER_EDGES_PER_REV 14000.0f // A-phase edges per wheel revolution from the 2025 GMR motor definition.
+#define BSP_MOTOR_ENCODER_EDGE_BATCH 10.0f // Match the 2025 same-car edge counter: one software count per ten A-phase edges.
+#define BSP_MOTOR_SPEED_SAMPLE_SECONDS 0.020f // The application calls the speed loop every 20 ms.
+#define BSP_MOTOR_ENCODER_TICK_TO_CM_S \
+    ((3.14159265f * BSP_MOTOR_ENCODER_WHEEL_DIAMETER_CM * BSP_MOTOR_ENCODER_EDGE_BATCH) / \
+     (BSP_MOTOR_ENCODER_EDGES_PER_REV * BSP_MOTOR_SPEED_SAMPLE_SECONDS))
+#define BSP_MOTOR_SPEED_TARGET_LIMIT_CM_S 60.0f // Reject accidental targets outside the first-stage test envelope.
+#define BSP_MOTOR_SPEED_TARGET_SLEW_CM_S 60.0f // Follow CCD wheel targets in one update; the verified CCD and PWM slew limits provide smoothing.
+#define BSP_MOTOR_SPEED_FILTER_ALPHA 1.00f // Match the 2025 same-car controller: use each measured window directly.
+#define BSP_MOTOR_SPEED_PID_KP 0.0050f // 2025 Kp=0.5 followed by /100 PWM conversion.
+#define BSP_MOTOR_SPEED_PID_KI 0.0010f // 2025 Ki=0.1 followed by /100 PWM conversion.
+#define BSP_MOTOR_SPEED_PID_KD 0.0005f // 2025 Kd=0.05 followed by /100 PWM conversion.
+#define BSP_MOTOR_SPEED_PID_START 0.0f // 2025 applies 10 percent once at start, not as a permanent feed-forward bias.
+#define BSP_MOTOR_SPEED_PID_FULL_START_CM_S 10.0f // Scale startup bias below 10 cm/s so a bend's inner wheel can nearly stop.
+#define BSP_MOTOR_SPEED_PID_ERROR_INT_THRESHOLD 50.0f // Match the 2025 error window for enabling integration.
+#define BSP_MOTOR_SPEED_PID_INTEGRAL_LIMIT 500.0f // With Ki=0.001 this matches the 2025 50-percent integral ceiling.
+#define BSP_MOTOR_SPEED_PID_OUTPUT_LIMIT 0.50f // Match the 2025 speed-PID output ceiling for the standalone test.
+#define BSP_MOTOR_SPEED_PWM_ACCEL_SLEW_LIMIT 1.0f // The 2025 controller writes each new PID output directly.
+#define BSP_MOTOR_SPEED_PWM_DECEL_SLEW_LIMIT 1.0f // The 2025 controller does not add a separate output slew limiter.
+#define BSP_MOTOR_SPEED_STARTUP_KICK_MIN_TARGET_CM_S 10.0f // Do not kick a bend's nearly stopped inner wheel.
+#define BSP_MOTOR_SPEED_STARTUP_KICK_PWM 0.10f // Match DC_Start(): apply ten-percent PWM before the first PID result.
+#define BSP_MOTOR_SPEED_STARTUP_KICK_WINDOWS 1U // 2025 gives the direct start command once, then hands control to PID.
+#define BSP_MOTOR_SPEED_STALL_MIN_TARGET_CM_S 5.0f // Ignore no-pulse detection while nearly stopped.
+#define BSP_MOTOR_SPEED_STALL_MIN_PWM 0.18f // Start stall timing only after enough PWM should move a lifted wheel.
+#define BSP_MOTOR_SPEED_STALL_WINDOWS 25U // Stop after 500 ms with commanded motion but no encoder batches.
 
 typedef struct {
-    float target; // Target encoder ticks per sample for one logical wheel.
-    float integral; // Accumulated speed error for low-speed friction compensation.
+    float requested_target; // Requested wheel speed in cm/s before the acceleration ramp.
+    float target; // Slew-limited wheel speed target in cm/s used by this update.
+    float measured; // Filtered measured wheel speed magnitude in cm/s.
+    float integral; // Accumulated speed error in cm/s samples.
     float last_error; // Previous speed error used by the derivative term.
     float command; // Latest PWM ratio generated by the speed PI loop.
+    float p_term; // Latest proportional contribution for debugger tuning.
+    float i_term; // Latest integral contribution for debugger tuning.
+    uint8_t startup_kick_windows; // Remaining direct-start samples before normal PI output takes over.
+    uint16_t zero_tick_windows; // Consecutive driven samples with no encoder batches.
+    uint8_t fault; // Live diagnostic flag; one means encoder batches disappeared under drive.
 } MotorSpeedPid;
 
 static volatile int32_t s_encoder_old_left_count = 0; // Raw old-left encoder position from PB13/PB20.
@@ -79,59 +99,153 @@ static float Motor_LimitFloat(float value, float min_value, float max_value)
     return value;
 }
 
-static float Motor_MeasuredSpeedForTarget(float target, int16_t raw_speed)
+static float Motor_Approach(float value, float target, float step)
 {
-    float magnitude = (float) ((raw_speed < 0) ? -raw_speed : raw_speed);
-
-    if (target < 0.0f) {
-        return -magnitude; // Use commanded direction as speed sign so reversed encoder wiring cannot destabilize PI.
+    if (value < target) {
+        value += step;
+        return (value > target) ? target : value;
     }
-    return magnitude; // Forward targets compare against positive encoder tick magnitude.
+    if (value > target) {
+        value -= step;
+        return (value < target) ? target : value;
+    }
+    return value;
+}
+
+static float Motor_ApproachCommand(float value, float target)
+{
+    float step;
+
+    if ((value * target) < 0.0f) {
+        return Motor_Approach(value, 0.0f, BSP_MOTOR_SPEED_PWM_DECEL_SLEW_LIMIT); // Decelerate through zero before reversing.
+    }
+
+    step = (Motor_AbsFloat(target) < Motor_AbsFloat(value)) ?
+           BSP_MOTOR_SPEED_PWM_DECEL_SLEW_LIMIT :
+           BSP_MOTOR_SPEED_PWM_ACCEL_SLEW_LIMIT;
+    return Motor_Approach(value, target, step);
 }
 
 static void Motor_SpeedPidResetOne(MotorSpeedPid *pid)
 {
-    pid->target = 0.0f; // Clear target so the controller starts from a stopped state.
+    pid->requested_target = 0.0f; // Clear external target so reset always returns to a stopped state.
+    pid->target = 0.0f; // Clear the ramped target used by the controller.
+    pid->measured = 0.0f; // Clear the encoder filter history.
     pid->integral = 0.0f; // Clear stored friction compensation.
     pid->last_error = 0.0f; // Clear derivative history after mode changes.
     pid->command = 0.0f; // Clear the output command before the next closed-loop run.
+    pid->p_term = 0.0f; // Clear debugger-visible P contribution.
+    pid->i_term = 0.0f; // Clear debugger-visible I contribution.
+    pid->startup_kick_windows = 0U; // Arm a kick only when the next nonzero target is requested.
+    pid->zero_tick_windows = 0U; // Restart encoder-loss supervision.
+    pid->fault = 0U; // A deliberate reset clears the latched encoder fault.
 }
 
-static float Motor_SpeedPidStep(MotorSpeedPid *pid, float measured)
+static void Motor_SpeedPidSetTargetOne(MotorSpeedPid *pid, float target)
 {
+    float previous_target = pid->requested_target;
+
+    target = Motor_LimitFloat(target,
+                              -BSP_MOTOR_SPEED_TARGET_LIMIT_CM_S,
+                              BSP_MOTOR_SPEED_TARGET_LIMIT_CM_S);
+    if (Motor_AbsFloat(target) < 0.1f) {
+        target = 0.0f;
+    }
+
+    if ((target * pid->requested_target) < 0.0f || target == 0.0f) {
+        pid->integral = 0.0f; // Direction changes and stops must not retain torque from the old target.
+        pid->last_error = 0.0f; // Suppress a derivative kick after a direction/stop request.
+    }
+    if (target == 0.0f) {
+        pid->startup_kick_windows = 0U;
+    } else if (Motor_AbsFloat(target) >= BSP_MOTOR_SPEED_STARTUP_KICK_MIN_TARGET_CM_S &&
+               (Motor_AbsFloat(previous_target) < 0.1f || (target * previous_target) < 0.0f)) {
+        pid->startup_kick_windows = BSP_MOTOR_SPEED_STARTUP_KICK_WINDOWS;
+    }
+    pid->requested_target = target;
+}
+
+static float Motor_SpeedPidStep(MotorSpeedPid *pid, int16_t encoder_ticks)
+{
+    float raw_measured;
+    float target_magnitude;
+    float direction;
     float error;
     float derivative;
-    float base;
+    float candidate_integral;
+    float candidate_output;
+    float desired_command;
+    float startup_bias;
+
+    pid->target = Motor_Approach(pid->target,
+                                 pid->requested_target,
+                                 BSP_MOTOR_SPEED_TARGET_SLEW_CM_S);
+
+    raw_measured = Motor_AbsFloat((float) encoder_ticks) * BSP_MOTOR_ENCODER_TICK_TO_CM_S;
+    pid->measured += BSP_MOTOR_SPEED_FILTER_ALPHA * (raw_measured - pid->measured);
 
     if (Motor_AbsFloat(pid->target) < 0.1f) {
         pid->integral = 0.0f; // Zero target should not keep stale integral torque.
         pid->last_error = 0.0f; // Zero target should restart derivative history.
-        pid->command = 0.0f; // Zero target maps to zero motor command.
-        return 0.0f;
+        pid->p_term = 0.0f;
+        pid->i_term = 0.0f;
+        pid->zero_tick_windows = 0U;
+        pid->command = Motor_ApproachCommand(pid->command, 0.0f);
+        return pid->command;
     }
-
-    error = pid->target - measured;
-    pid->integral += error;
-    pid->integral = Motor_LimitFloat(pid->integral,
-                                     -BSP_MOTOR_SPEED_PID_INTEGRAL_LIMIT,
-                                     BSP_MOTOR_SPEED_PID_INTEGRAL_LIMIT); // Limit integral windup while a wheel is stuck.
+    direction = (pid->target < 0.0f) ? -1.0f : 1.0f;
+    target_magnitude = Motor_AbsFloat(pid->target);
+    startup_bias = BSP_MOTOR_SPEED_PID_START *
+                   Motor_LimitFloat(target_magnitude / BSP_MOTOR_SPEED_PID_FULL_START_CM_S,
+                                    0.0f,
+                                    1.0f);
+    error = target_magnitude - pid->measured;
+    pid->p_term = BSP_MOTOR_SPEED_PID_KP * error;
     derivative = error - pid->last_error;
     pid->last_error = error;
 
-    base = pid->target * BSP_MOTOR_SPEED_PID_KFF;
-    if (pid->target > 0.0f) {
-        base += BSP_MOTOR_SPEED_PID_START; // Add a positive startup bias for forward motion.
+    candidate_integral = Motor_LimitFloat(pid->integral + error,
+                                          -BSP_MOTOR_SPEED_PID_INTEGRAL_LIMIT,
+                                          BSP_MOTOR_SPEED_PID_INTEGRAL_LIMIT);
+    candidate_output = startup_bias +
+                       pid->p_term +
+                       (BSP_MOTOR_SPEED_PID_KI * candidate_integral) +
+                       (BSP_MOTOR_SPEED_PID_KD * derivative);
+    if (Motor_AbsFloat(error) < BSP_MOTOR_SPEED_PID_ERROR_INT_THRESHOLD &&
+        ((candidate_output > 0.0f && candidate_output < BSP_MOTOR_SPEED_PID_OUTPUT_LIMIT) ||
+         (candidate_output >= BSP_MOTOR_SPEED_PID_OUTPUT_LIMIT && error < 0.0f) ||
+         (candidate_output <= 0.0f && error > 0.0f))) {
+        pid->integral = candidate_integral; // Conditional integration prevents windup at both output rails.
+    }
+    pid->i_term = BSP_MOTOR_SPEED_PID_KI * pid->integral;
+
+    desired_command = startup_bias +
+                      pid->p_term +
+                      pid->i_term +
+                      (BSP_MOTOR_SPEED_PID_KD * derivative);
+    desired_command = Motor_LimitFloat(desired_command, 0.0f, BSP_MOTOR_SPEED_PID_OUTPUT_LIMIT);
+    desired_command *= direction;
+    if (pid->startup_kick_windows > 0U && encoder_ticks == 0) {
+        pid->command = direction * BSP_MOTOR_SPEED_STARTUP_KICK_PWM; // Match the explicit start command used by both reference projects.
+        pid->startup_kick_windows--;
     } else {
-        base -= BSP_MOTOR_SPEED_PID_START; // Add a negative startup bias for reverse motion.
+        pid->startup_kick_windows = 0U; // The first encoder batch proves the wheel has crossed static friction.
+        pid->command = Motor_ApproachCommand(pid->command, desired_command);
     }
 
-    pid->command = base +
-                   (BSP_MOTOR_SPEED_PID_KP * error) +
-                   (BSP_MOTOR_SPEED_PID_KI * pid->integral) +
-                   (BSP_MOTOR_SPEED_PID_KD * derivative);
-    pid->command = Motor_LimitFloat(pid->command,
-                                    -BSP_MOTOR_SPEED_PID_OUTPUT_LIMIT,
-                                    BSP_MOTOR_SPEED_PID_OUTPUT_LIMIT); // Keep speed-loop output within a test-safe range.
+    if (target_magnitude >= BSP_MOTOR_SPEED_STALL_MIN_TARGET_CM_S &&
+        Motor_AbsFloat(pid->command) >= BSP_MOTOR_SPEED_STALL_MIN_PWM &&
+        encoder_ticks == 0) {
+        if (pid->zero_tick_windows < 0xFFFFU) {
+            pid->zero_tick_windows++;
+        }
+        if (pid->zero_tick_windows >= BSP_MOTOR_SPEED_STALL_WINDOWS) {
+            pid->fault = 1U; // Report missing feedback without abruptly braking and throwing the CCD line out of view.
+        }
+    } else {
+        pid->zero_tick_windows = 0U;
+        pid->fault = 0U; // Clear the live warning as soon as feedback or a low-drive condition returns.
+    }
     return pid->command;
 }
 
@@ -192,14 +306,14 @@ void Bsp_Motor_Coast(void)
 void Bsp_Motor_Set(float left_ratio, float right_ratio)
 {
     DL_TimerG_startCounter(PWM_DC_INST);
-    Motor_SetOne(Motor_ApplyTrim(right_ratio, BSP_MOTOR_RIGHT_DIR,
-                                 BSP_MOTOR_RIGHT_FORWARD_SCALE,
-                                 BSP_MOTOR_RIGHT_REVERSE_SCALE),
-                 GPIO_DC_AIN0_PIN, GPIO_PWM_DC_C0_IDX); // Logical right wheel is wired to the old-left motor channel.
     Motor_SetOne(Motor_ApplyTrim(left_ratio, BSP_MOTOR_LEFT_DIR,
                                  BSP_MOTOR_LEFT_FORWARD_SCALE,
                                  BSP_MOTOR_LEFT_REVERSE_SCALE),
-                 GPIO_DC_AIN2_PIN, GPIO_PWM_DC_C1_IDX); // Logical left wheel is wired to the old-right motor channel.
+                 GPIO_DC_AIN0_PIN, GPIO_PWM_DC_C0_IDX); // Logical left now drives the physical-left six-wire connector.
+    Motor_SetOne(Motor_ApplyTrim(right_ratio, BSP_MOTOR_RIGHT_DIR,
+                                 BSP_MOTOR_RIGHT_FORWARD_SCALE,
+                                 BSP_MOTOR_RIGHT_REVERSE_SCALE),
+                 GPIO_DC_AIN2_PIN, GPIO_PWM_DC_C1_IDX); // Logical right now drives the physical-right six-wire connector.
 }
 
 void Bsp_Motor_SetLeftRaw(uint8_t dir_high, uint32_t compare)
@@ -210,11 +324,11 @@ void Bsp_Motor_SetLeftRaw(uint8_t dir_high, uint32_t compare)
 
     DL_TimerG_startCounter(PWM_DC_INST);
     if (dir_high) {
-        DL_GPIO_setPins(GPIO_DC_PORT, GPIO_DC_AIN2_PIN); // Logical left raw drives the old-right motor channel.
+        DL_GPIO_setPins(GPIO_DC_PORT, GPIO_DC_AIN0_PIN); // Logical left raw follows the corrected physical-left channel.
     } else {
-        DL_GPIO_clearPins(GPIO_DC_PORT, GPIO_DC_AIN2_PIN); // Logical left raw drives the old-right motor channel.
+        DL_GPIO_clearPins(GPIO_DC_PORT, GPIO_DC_AIN0_PIN); // Logical left raw follows the corrected physical-left channel.
     }
-    DL_Timer_setCaptureCompareValue(PWM_DC_INST, compare, GPIO_PWM_DC_C1_IDX); // Logical left raw drives the old-right motor channel.
+    DL_Timer_setCaptureCompareValue(PWM_DC_INST, compare, GPIO_PWM_DC_C0_IDX); // Logical left raw follows the corrected physical-left channel.
 }
 
 void Bsp_Motor_SetRightRaw(uint8_t dir_high, uint32_t compare)
@@ -225,45 +339,20 @@ void Bsp_Motor_SetRightRaw(uint8_t dir_high, uint32_t compare)
 
     DL_TimerG_startCounter(PWM_DC_INST);
     if (dir_high) {
-        DL_GPIO_setPins(GPIO_DC_PORT, GPIO_DC_AIN0_PIN); // Logical right raw drives the old-left motor channel.
+        DL_GPIO_setPins(GPIO_DC_PORT, GPIO_DC_AIN2_PIN); // Logical right raw follows the corrected physical-right channel.
     } else {
-        DL_GPIO_clearPins(GPIO_DC_PORT, GPIO_DC_AIN0_PIN); // Logical right raw drives the old-left motor channel.
+        DL_GPIO_clearPins(GPIO_DC_PORT, GPIO_DC_AIN2_PIN); // Logical right raw follows the corrected physical-right channel.
     }
-    DL_Timer_setCaptureCompareValue(PWM_DC_INST, compare, GPIO_PWM_DC_C0_IDX); // Logical right raw drives the old-left motor channel.
+    DL_Timer_setCaptureCompareValue(PWM_DC_INST, compare, GPIO_PWM_DC_C1_IDX); // Logical right raw follows the corrected physical-right channel.
 }
 
 void Bsp_Motor_EncoderInit(void)
 {
-    DL_GPIO_initDigitalInputFeatures(IOMUX_PINCM30, DL_GPIO_INVERSION_DISABLE,
-                                     DL_GPIO_RESISTOR_PULL_UP,
-                                     DL_GPIO_HYSTERESIS_ENABLE,
-                                     DL_GPIO_WAKEUP_DISABLE); // PB13 old-left encoder A input.
-    DL_GPIO_initDigitalInputFeatures(IOMUX_PINCM32, DL_GPIO_INVERSION_DISABLE,
-                                     DL_GPIO_RESISTOR_PULL_UP,
-                                     DL_GPIO_HYSTERESIS_ENABLE,
-                                     DL_GPIO_WAKEUP_DISABLE); // PB15 old-right encoder A input.
-    DL_GPIO_initDigitalInputFeatures(IOMUX_PINCM48, DL_GPIO_INVERSION_DISABLE,
-                                     DL_GPIO_RESISTOR_PULL_UP,
-                                     DL_GPIO_HYSTERESIS_ENABLE,
-                                     DL_GPIO_WAKEUP_DISABLE); // PB20 old-left encoder B input.
-    DL_GPIO_initDigitalInputFeatures(IOMUX_PINCM43, DL_GPIO_INVERSION_DISABLE,
-                                     DL_GPIO_RESISTOR_PULL_UP,
-                                     DL_GPIO_HYSTERESIS_ENABLE,
-                                     DL_GPIO_WAKEUP_DISABLE); // PB17 old-right encoder B input.
-
-    DL_GPIO_setLowerPinsInputFilter(GPIOB,
-                                    DL_GPIO_PIN_13_INPUT_FILTER_8_CYCLES |
-                                    DL_GPIO_PIN_15_INPUT_FILTER_8_CYCLES); // Debounce A-phase interrupts like the 2025 SysConfig.
-    DL_GPIO_setUpperPinsInputFilter(GPIOB,
-                                    DL_GPIO_PIN_17_INPUT_FILTER_8_CYCLES |
-                                    DL_GPIO_PIN_20_INPUT_FILTER_8_CYCLES); // Filter B phases so direction reads are stable.
-    DL_GPIO_setLowerPinsPolarity(GPIOB,
-                                 DL_GPIO_PIN_13_EDGE_RISE |
-                                 DL_GPIO_PIN_15_EDGE_RISE); // Count one edge per encoder cycle first to reduce interrupt load.
-    DL_GPIO_clearInterruptStatus(GPIOB, BSP_MOTOR_ENCODER_A_MASK); // Clear stale encoder edges before enabling the IRQ.
-    DL_GPIO_enableInterrupt(GPIOB, BSP_MOTOR_ENCODER_A_MASK); // Enable A-phase GPIO interrupts for both encoder channels.
-    NVIC_EnableIRQ(GPIOB_INT_IRQn); // Route GPIOB group interrupts into GROUP1_IRQHandler.
     Bsp_Motor_EncoderReset();
+    NVIC_EnableIRQ(COMPARE_0_INST_INT_IRQN); // PB13 old-left A phase: one IRQ per ten encoder edges.
+    NVIC_EnableIRQ(COMPARE_1_INST_INT_IRQN); // PB15 old-right A phase: one IRQ per ten encoder edges.
+    DL_TimerG_startCounter(COMPARE_0_INST);
+    DL_TimerG_startCounter(COMPARE_1_INST);
 }
 
 void Bsp_Motor_EncoderReset(void)
@@ -286,8 +375,8 @@ void Bsp_Motor_EncoderSample(void)
     int32_t right_delta;
 
     __disable_irq();
-    right_count = s_encoder_old_left_count; // Logical right wheel is wired to the 2025 old-left motor/encoder channel.
-    left_count = s_encoder_old_right_count; // Logical left wheel is wired to the 2025 old-right motor/encoder channel.
+    left_count = s_encoder_old_left_count; // PB13/PB20 now belong to the physical-left six-wire connector.
+    right_count = s_encoder_old_right_count; // PB15/PB17 now belong to the physical-right six-wire connector.
     __enable_irq();
 
     left_delta = left_count - s_encoder_left_last_count;
@@ -300,12 +389,12 @@ void Bsp_Motor_EncoderSample(void)
 
 int32_t Bsp_Motor_GetLeftEncoderCount(void)
 {
-    return s_encoder_old_right_count; // Logical left maps to the 2025 old-right encoder channel.
+    return s_encoder_old_left_count; // Logical left follows the corrected physical-left encoder channel.
 }
 
 int32_t Bsp_Motor_GetRightEncoderCount(void)
 {
-    return s_encoder_old_left_count; // Logical right maps to the 2025 old-left encoder channel.
+    return s_encoder_old_right_count; // Logical right follows the corrected physical-right encoder channel.
 }
 
 int16_t Bsp_Motor_GetLeftEncoderSpeed(void)
@@ -330,25 +419,21 @@ void Bsp_Motor_SpeedPidReset(void)
     Bsp_Motor_EncoderSample(); // Refresh sample baselines so the first PI update does not include old ticks.
 }
 
-void Bsp_Motor_SetSpeedTargets(float left_ticks, float right_ticks)
+void Bsp_Motor_SetSpeedTargets(float left_cm_s, float right_cm_s)
 {
-    s_left_speed_pid.target = left_ticks; // Set logical-left speed target in encoder ticks per sample.
-    s_right_speed_pid.target = right_ticks; // Set logical-right speed target in encoder ticks per sample.
+    Motor_SpeedPidSetTargetOne(&s_left_speed_pid, left_cm_s); // Set logical-left requested speed in cm/s.
+    Motor_SpeedPidSetTargetOne(&s_right_speed_pid, right_cm_s); // Set logical-right requested speed in cm/s.
 }
 
 void Bsp_Motor_SpeedPidUpdate(void)
 {
-    float left_measured;
-    float right_measured;
     float left_cmd;
     float right_cmd;
 
     Bsp_Motor_EncoderSample(); // Measure wheel ticks accumulated since the previous speed-loop update.
-    left_measured = Motor_MeasuredSpeedForTarget(s_left_speed_pid.target, s_encoder_left_speed);
-    right_measured = Motor_MeasuredSpeedForTarget(s_right_speed_pid.target, s_encoder_right_speed);
-    left_cmd = Motor_SpeedPidStep(&s_left_speed_pid, left_measured);
-    right_cmd = Motor_SpeedPidStep(&s_right_speed_pid, right_measured);
-    Bsp_Motor_Set(left_cmd, right_cmd); // Apply closed-loop PWM ratios through the verified logical motor mapping.
+    left_cmd = Motor_SpeedPidStep(&s_left_speed_pid, s_encoder_left_speed);
+    right_cmd = Motor_SpeedPidStep(&s_right_speed_pid, s_encoder_right_speed);
+    Bsp_Motor_Set(left_cmd, right_cmd); // Keep running at the 0.35 baseline cap while fault bits diagnose missing feedback.
 }
 
 void Bsp_Motor_SpeedPidStop(void)
@@ -360,12 +445,12 @@ void Bsp_Motor_SpeedPidStop(void)
 
 float Bsp_Motor_GetLeftSpeedTarget(void)
 {
-    return s_left_speed_pid.target; // Expose logical-left target for Watch/Expressions.
+    return s_left_speed_pid.target; // Expose logical-left slew-limited target in cm/s.
 }
 
 float Bsp_Motor_GetRightSpeedTarget(void)
 {
-    return s_right_speed_pid.target; // Expose logical-right target for Watch/Expressions.
+    return s_right_speed_pid.target; // Expose logical-right slew-limited target in cm/s.
 }
 
 float Bsp_Motor_GetLeftSpeedCommand(void)
@@ -378,25 +463,60 @@ float Bsp_Motor_GetRightSpeedCommand(void)
     return s_right_speed_pid.command; // Expose logical-right generated PWM ratio for Watch/Expressions.
 }
 
-void GROUP1_IRQHandler(void)
+float Bsp_Motor_GetLeftMeasuredSpeed(void)
 {
-    if (DL_Interrupt_getPendingGroup(DL_INTERRUPT_GROUP_1) == DL_INTERRUPT_GROUP1_IIDX_GPIOB) {
-        uint32_t status = DL_GPIO_getEnabledInterruptStatus(GPIOB, BSP_MOTOR_ENCODER_A_MASK);
+    return s_left_speed_pid.measured; // Expose filtered logical-left speed in cm/s.
+}
 
-        DL_GPIO_clearInterruptStatus(GPIOB, status); // Clear both encoder A-phase interrupts before doing software counting.
-        if ((status & BSP_MOTOR_ENCODER_OLD_LEFT_A_PIN) != 0U) {
-            if ((DL_GPIO_readPins(GPIOB, BSP_MOTOR_ENCODER_OLD_LEFT_B_PIN)) == 0U) {
-                s_encoder_old_left_count++; // Match the 2025 A/B direction convention for old-left encoder.
-            } else {
-                s_encoder_old_left_count--; // Match the 2025 A/B direction convention for old-left encoder.
-            }
+float Bsp_Motor_GetRightMeasuredSpeed(void)
+{
+    return s_right_speed_pid.measured; // Expose filtered logical-right speed in cm/s.
+}
+
+float Bsp_Motor_GetLeftSpeedPTerm(void)
+{
+    return s_left_speed_pid.p_term;
+}
+
+float Bsp_Motor_GetRightSpeedPTerm(void)
+{
+    return s_right_speed_pid.p_term;
+}
+
+float Bsp_Motor_GetLeftSpeedITerm(void)
+{
+    return s_left_speed_pid.i_term;
+}
+
+float Bsp_Motor_GetRightSpeedITerm(void)
+{
+    return s_right_speed_pid.i_term;
+}
+
+uint32_t Bsp_Motor_GetSpeedFaults(void)
+{
+    return ((uint32_t) s_left_speed_pid.fault) |
+           (((uint32_t) s_right_speed_pid.fault) << 1U); // Bit 0 left, bit 1 right.
+}
+
+void COMPARE_0_INST_IRQHandler(void)
+{
+    if (DL_TimerG_getPendingInterrupt(COMPARE_0_INST) == DL_TIMERG_IIDX_LOAD) {
+        if (DL_GPIO_readPins(GPIO_ENCODER_PORT, GPIO_ENCODER_PIN_1B_PIN) == 0U) {
+            s_encoder_old_left_count++;
+        } else {
+            s_encoder_old_left_count--;
         }
-        if ((status & BSP_MOTOR_ENCODER_OLD_RIGHT_A_PIN) != 0U) {
-            if ((DL_GPIO_readPins(GPIOB, BSP_MOTOR_ENCODER_OLD_RIGHT_B_PIN)) == 0U) {
-                s_encoder_old_right_count++; // Match the 2025 A/B direction convention for old-right encoder.
-            } else {
-                s_encoder_old_right_count--; // Match the 2025 A/B direction convention for old-right encoder.
-            }
+    }
+}
+
+void COMPARE_1_INST_IRQHandler(void)
+{
+    if (DL_TimerG_getPendingInterrupt(COMPARE_1_INST) == DL_TIMERG_IIDX_LOAD) {
+        if (DL_GPIO_readPins(GPIO_ENCODER_PORT, GPIO_ENCODER_PIN_2B_PIN) == 0U) {
+            s_encoder_old_right_count++;
+        } else {
+            s_encoder_old_right_count--;
         }
     }
 }
