@@ -34,6 +34,19 @@ uint8_t Bsp_Uart_K230_ReceiveByteBlocking(void)
     return DL_UART_Main_receiveDataBlocking(UART_K230_INST);
 }
 
+uint8_t Bsp_Uart_K230_TryReceiveByte(uint8_t *byte)
+{
+    if (byte == NULL) {
+        return 0U;
+    }
+
+    return DL_UART_Main_receiveDataCheck(
+               UART_K230_INST,
+               byte)
+               ? 1U
+               : 0U;
+}
+
 uint32_t Bsp_Uart_K230_GetErrorStatus(void)
 {
     return DL_UART_Main_getRawInterruptStatus(UART_K230_INST, BSP_UART_K230_ERROR_MASK);
