@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 #define K230_PROTOCOL_LINE_SIZE 32U
+#define K230_LINK_TIMEOUT_MS 300U
+#define K230_MIN_CONFIDENCE 70U
 
 typedef struct {
     uint8_t detected;
@@ -17,6 +19,10 @@ extern volatile K230_TargetFrame g_k230_latest_frame;
 extern volatile uint32_t g_k230_valid_frame_count;
 extern volatile uint32_t g_k230_invalid_frame_count;
 extern volatile uint32_t g_k230_rx_byte_count;
+extern volatile uint8_t g_k230_link_alive;
+extern volatile uint8_t g_k230_target_valid;
+extern volatile uint32_t g_k230_last_frame_ms;
+extern volatile uint32_t g_k230_timeout_count;
 
 /**
  * 初始化 K230 协议接收状态。
