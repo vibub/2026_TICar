@@ -15,6 +15,6 @@
 #define APP_MODE_K230_FOLLOW 12
 
 // Phase 3: run the frozen CCD controller with the verified 2025 same-car wheel-speed loop.
-#define APP_MODE APP_MODE_CIRCLE_FOLLOW
+#define APP_MODE APP_MODE_K230_FOLLOW
 
 #endif

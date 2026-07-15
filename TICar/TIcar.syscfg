@@ -139,7 +139,7 @@ PWM2.ccp1PinConfig.direction            = scripting.forceWrite("OUTPUT");
 PWM2.ccp1PinConfig.hideOutputInversion  = scripting.forceWrite(false);
 PWM2.ccp1PinConfig.onlyInternalResistor = scripting.forceWrite(false);
 PWM2.ccp1PinConfig.passedPeripheralType = scripting.forceWrite("Digital");
-PWM2.ccp1PinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric6";
+PWM2.ccp1PinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric8";
 
 SYSCTL.forceDefaultClkConfig = true;
 
