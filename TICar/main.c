@@ -2,7 +2,7 @@
 #include "app_main.h"
 #include "ti_msp_dl_config.h"
 
-#if (APP_MODE == APP_MODE_UART_TEST) || (APP_MODE == APP_MODE_CCD_WATCH)
+#if (APP_MODE == APP_MODE_UART_TEST) || (APP_MODE == APP_MODE_CCD_WATCH) || (APP_MODE == APP_MODE_K230_UART)
 static void Main_SafeDebugSysInit(void)
 {
     SYSCFG_DL_initPower();
@@ -41,7 +41,7 @@ static void Main_SafeDebugSysInit(void)
 
 int main(void)
 {
-#if (APP_MODE == APP_MODE_UART_TEST) || (APP_MODE == APP_MODE_CCD_WATCH)
+#if (APP_MODE == APP_MODE_UART_TEST) || (APP_MODE == APP_MODE_CCD_WATCH) || (APP_MODE == APP_MODE_K230_UART)
     Main_SafeDebugSysInit(); // Skip full SysConfig init so PWM is never enabled during safe debug modes.
 #else
     SYSCFG_DL_init();
