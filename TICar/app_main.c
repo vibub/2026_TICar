@@ -4,6 +4,7 @@
 #include "bsp_ccd.h"
 #include "bsp_gpio.h"
 #include "bsp_motor.h"
+#include "bsp_ptz.h"
 #include "bsp_uart.h"
 #include "pid.h"
 #include "protocol_k230.h"
@@ -53,6 +54,14 @@
 #define APP_SPEED_TEST_LOOP_DELAY (CPUCLK_FREQ / 50U) // Run speed PID around 50 Hz like the line-follow loop.
 
 volatile uint32_t g_app_debug_mode = 0U; // Watch this value to confirm the running firmware writes the selected APP_MODE.
+
+#if APP_MODE == APP_MODE_K230_FOLLOW
+static uint32_t g_k230_follow_seen_timeout_count;
+#endif
+
+#if APP_MODE == APP_MODE_K230_FOLLOW
+static uint32_t g_k230_follow_seen_timeout_count;
+#endif
 
 #if (APP_MODE == APP_MODE_ENCODER_WATCH) || (APP_MODE == APP_MODE_SPEED_TEST) || \
     (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW)
@@ -281,9 +290,14 @@ void App_Init(void)
 #else
     Bsp_Motor_Disable(); // Non-motor debug modes must keep PWM and H-bridge outputs idle.
 #endif
-#if (APP_MODE == APP_MODE_ENCODER_WATCH) || (APP_MODE == APP_MODE_SPEED_TEST) || \
-    (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW)
-    Bsp_Motor_EncoderInit(); // Start both 2025-style hardware encoder edge counters.
+#if APP_MODE == APP_MODE_K230_FOLLOW
+    Bsp_Ptz_Init(); // Load safe center compare values before the first servo PWM frame.
+    Bsp_Ptz_Start(); // Only the K230 follow mode enables the dual-axis servo output.
+#elif (APP_MODE != APP_MODE_UART_TEST) && (APP_MODE != APP_MODE_CCD_WATCH) && (APP_MODE != APP_MODE_K230_UART)
+    Bsp_Ptz_Disable(); // Full SysConfig modes that do not use the PTZ must force both servo signals low.
+#endif
+#if (APP_MODE == APP_MODE_ENCODER_WATCH) || (APP_MODE == APP_MODE_SPEED_TEST)
+    Bsp_Motor_EncoderInit(); // Enable 2025-board encoder pins PB13/PB20 and PB15/PB17.
 #endif
 #if (APP_MODE == APP_MODE_SPEED_TEST) || (APP_MODE == APP_MODE_LINE_FOLLOW) || \
     (APP_MODE == APP_MODE_CIRCLE_FOLLOW)
@@ -307,6 +321,9 @@ void App_Init(void)
     Bsp_Gpio_SetHeartbeat(0U); // Keep heartbeat under software control while the speed loop is running.
 #endif
     Protocol_K230_Init();
+#if APP_MODE == APP_MODE_K230_FOLLOW
+    g_k230_follow_seen_timeout_count = g_k230_timeout_count;
+#endif
     PID_InitDefaults();
 }
 
@@ -317,6 +334,12 @@ void App_Loop(void)
     delay_cycles(16000000);
 #elif APP_MODE == APP_MODE_K230_UART
     Protocol_K230_Task();
+#elif APP_MODE == APP_MODE_K230_FOLLOW
+    Protocol_K230_Task();
+    if (g_k230_timeout_count != g_k230_follow_seen_timeout_count) {
+        g_k230_follow_seen_timeout_count = g_k230_timeout_count;
+        Bsp_Ptz_Disable(); // A link timeout removes servo PWM until the mode is restarted.
+    }
 #elif APP_MODE == APP_MODE_MOTOR_PWM
     Bsp_Motor_Set(APP_MOTOR_TEST_SLOW_SPEED, APP_MOTOR_TEST_FAST_SPEED); // Right command is faster; the car should yaw left if mapping is correct.
     delay_cycles(APP_DELAY_2S);

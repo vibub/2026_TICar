@@ -18,7 +18,6 @@ NMS_THRESHOLD = 0.45
 DEAD_ZONE_X = 5
 DEAD_ZONE_Y = 5
 SEND_INTERVAL_MS = 100
-LOST_FRAME_LIMIT = 3
 DEBUG_PRINT = True
 
 
@@ -145,8 +144,6 @@ try:
     image_center_y = VISION_SIZE[1] // 2
     last_send_ms = time.ticks_ms()
     previous_center = None
-    lost_count = 0
-    no_target_sent = False
     gc_counter = 0
 
     while True:
@@ -183,9 +180,6 @@ try:
             error_y = center_y - image_center_y
             error_x, error_y = apply_dead_zone(error_x, error_y)
 
-            lost_count = 0
-            no_target_sent = False
-
             now_ms = time.ticks_ms()
             if time.ticks_diff(now_ms, last_send_ms) >= SEND_INTERVAL_MS:
                 message = "T,{},{},{}\r\n".format(
@@ -208,17 +202,15 @@ try:
                         "confidence=", int(confidence * 100)
                     )
         else:
-            lost_count += 1
+            previous_center = None
 
-            if lost_count >= LOST_FRAME_LIMIT:
-                previous_center = None
+            now_ms = time.ticks_ms()
+            if time.ticks_diff(now_ms, last_send_ms) >= SEND_INTERVAL_MS:
+                uart.write("N\r\n")
+                last_send_ms = now_ms
 
-                if not no_target_sent:
-                    uart.write("N\r\n")
-                    no_target_sent = True
-
-                    if DEBUG_PRINT:
-                        print("TARGET LOST: 连续", lost_count, "帧未检测到目标")
+                if DEBUG_PRINT:
+                    print("NO TARGET")
 
         # 清空MSPM0回传，避免ACK数据在接收缓冲区累计。
         received = uart.read()

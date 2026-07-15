@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bsp_time.h"
 #include "bsp_uart.h"
 
 static char g_k230_line[K230_PROTOCOL_LINE_SIZE];
@@ -13,9 +14,11 @@ static uint8_t g_k230_new_frame;
 
 volatile uint32_t g_k230_valid_frame_count;
 volatile uint32_t g_k230_invalid_frame_count;
-
-// test
 volatile uint32_t g_k230_rx_byte_count;
+volatile uint8_t g_k230_link_alive;
+volatile uint8_t g_k230_target_valid;
+volatile uint32_t g_k230_last_frame_ms;
+volatile uint32_t g_k230_timeout_count;
 
 
 void Protocol_K230_Init(void)
@@ -24,14 +27,18 @@ void Protocol_K230_Init(void)
     g_k230_new_frame = 0U;
     g_k230_valid_frame_count = 0U;
     g_k230_invalid_frame_count = 0U;
+    g_k230_rx_byte_count = 0U;
+    g_k230_link_alive = 0U;
+    g_k230_target_valid = 0U;
+    g_k230_last_frame_ms = 0U;
+    g_k230_timeout_count = 0U;
 
     g_k230_latest_frame.detected = 0U;
     g_k230_latest_frame.error_x = 0;
     g_k230_latest_frame.error_y = 0;
     g_k230_latest_frame.confidence = 0U;
 
-    g_k230_rx_byte_count = 0U;
-
+    Bsp_Time_Init();
 }
 
 uint8_t Protocol_K230_ParseLine(
@@ -112,6 +119,10 @@ static void Protocol_K230_ProcessCompleteLine(void)
         g_k230_latest_frame = frame;
         g_k230_new_frame = 1U;
         g_k230_valid_frame_count++;
+        g_k230_last_frame_ms = Bsp_Time_GetMilliseconds();
+        g_k230_link_alive = 1U;
+        g_k230_target_valid = ((frame.detected != 0U) &&
+                               (frame.confidence >= K230_MIN_CONFIDENCE)) ? 1U : 0U;
 
         if (frame.detected != 0U) {
             Bsp_Uart_K230_SendString("ACK,T\r\n");
@@ -179,6 +190,14 @@ void Protocol_K230_Task(void)
             g_k230_invalid_frame_count++;
             Bsp_Uart_K230_SendString("ERR,FRAME\r\n");
         }
+    }
+
+    if ((g_k230_link_alive != 0U) &&
+        ((uint32_t) (Bsp_Time_GetMilliseconds() - g_k230_last_frame_ms) >=
+         K230_LINK_TIMEOUT_MS)) {
+        g_k230_link_alive = 0U;
+        g_k230_target_valid = 0U;
+        g_k230_timeout_count++;
     }
 }
 
