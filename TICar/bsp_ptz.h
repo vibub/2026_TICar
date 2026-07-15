@@ -9,9 +9,9 @@
 #define BSP_PTZ_TILT_MIN 400U
 #define BSP_PTZ_TILT_MAX 1075U
 
-#define BSP_PTZ_PAN_CENTER 750U
-#define BSP_PTZ_PAN_MIN 250U
-#define BSP_PTZ_PAN_MAX 1250U
+#define BSP_PTZ_PAN_CENTER 770U //770U
+#define BSP_PTZ_PAN_MIN 270U //270U
+#define BSP_PTZ_PAN_MAX 1270U //1270U
 
 /**
  * 初始化双轴云台并写入中心位置，但不启动 PWM。
