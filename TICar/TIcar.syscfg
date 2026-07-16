@@ -146,7 +146,6 @@ PWM2.ccp1PinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric8";
 
 SYSCTL.forceDefaultClkConfig = true;
 
-UART1.targetBaudRate                   = 115200;
 UART1.$name                            = "UART_K230";
 UART1.enableFIFO                       = true;
 UART1.rxFifoThreshold                  = "DL_UART_RX_FIFO_LEVEL_ONE_ENTRY";
