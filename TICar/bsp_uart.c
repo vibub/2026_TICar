@@ -1,3 +1,9 @@
+/**
+ * @file bsp_uart.c
+ * @brief K230 轮询 UART 与 TJC 中断 UART 的底层收发实现。
+ *
+ * TJC ISR 是环形缓冲区的唯一生产者，主循环是唯一消费者；ISR 不解析协议或切换模式。
+ */
 #include "bsp_uart.h"
 
 #include <stddef.h>
@@ -10,14 +16,17 @@
                  DL_UART_MAIN_INTERRUPT_PARITY_ERROR |                     \
                  DL_UART_MAIN_INTERRUPT_FRAMING_ERROR |                    \
                  DL_UART_MAIN_INTERRUPT_NOISE_ERROR))
+/* 16 槽单生产者/单消费者缓冲区；预留一个空槽用于区分“空”和“满”。 */
 #define BSP_UART_TJC_RX_BUFFER_SIZE 16U
 
+/* head 只由 UART ISR 推进，tail 只由主循环推进；满时丢弃新字节并累计 overflow。 */
 static volatile uint8_t g_tjc_rx_buffer[BSP_UART_TJC_RX_BUFFER_SIZE];
 static volatile uint8_t g_tjc_rx_head;
 static volatile uint8_t g_tjc_rx_tail;
 static volatile uint32_t g_tjc_rx_overflow_count;
 static volatile uint32_t g_tjc_rx_error_count;
 
+/* ISR 专用入队函数。next_head 追上 tail 表示缓冲已满，此时保留旧数据并丢弃新字节。 */
 static void Bsp_Uart_Tjc_PushRx(uint8_t byte)
 {
     uint8_t next_head = (uint8_t) ((g_tjc_rx_head + 1U) % BSP_UART_TJC_RX_BUFFER_SIZE);
@@ -31,6 +40,7 @@ static void Bsp_Uart_Tjc_PushRx(uint8_t byte)
     g_tjc_rx_head = next_head;
 }
 
+/* 清空软件接收状态后开启 UART3 中断；外设寄存器本身已由 SysConfig 初始化。 */
 void Bsp_Uart_Init(void)
 {
     g_tjc_rx_head = 0U;
@@ -128,6 +138,10 @@ uint32_t Bsp_Uart_Tjc_GetErrorCount(void)
     return g_tjc_rx_error_count;
 }
 
+/*
+ * TJC UART3 ISR：RX 中断尽可能排空硬件 FIFO并入队；通信错误则累计计数并丢弃 FIFO 中的不可靠字节。
+ * ISR 不做协议解析、不发送响应、不调用模式管理；这些工作由主循环 Protocol_Tjc_Task() 完成。
+ */
 void UART_TJC3224T124_INST_IRQHandler(void)
 {
     DL_UART_IIDX interrupt_index;

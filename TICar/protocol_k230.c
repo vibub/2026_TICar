@@ -1,3 +1,7 @@
+/**
+ * @file protocol_k230.c
+ * @brief 解析 K230 按行文本目标帧，维护最新目标、链路状态和协议统计。
+ */
 #include "protocol_k230.h"
 
 #include <stdio.h>
@@ -6,9 +10,11 @@
 #include "bsp_time.h"
 #include "bsp_uart.h"
 
+/* 当前 CRLF 文本行的组帧缓冲和已接收长度。 */
 static char g_k230_line[K230_PROTOCOL_LINE_SIZE];
 static uint8_t g_k230_line_length;
 
+/* 最新帧采用单槽发布：新帧到达会覆盖槽内容，TakeLatestFrame() 成功后清除消费标志。 */
 volatile K230_TargetFrame g_k230_latest_frame;
 static uint8_t g_k230_new_frame;
 
@@ -21,6 +27,7 @@ volatile uint32_t g_k230_last_frame_ms;
 volatile uint32_t g_k230_timeout_count;
 
 
+/* 清除半帧、最新帧标志、链路状态和全部协议统计；不会重新初始化公共 SysTick。 */
 void Protocol_K230_Init(void)
 {
     g_k230_line_length = 0U;
@@ -107,6 +114,7 @@ uint8_t Protocol_K230_ParseLine(
     return 1U;
 }
 
+/* 完整行解析成功后发布最新帧并回复 ACK；格式或范围错误则累计无效帧并回复 ERR。 */
 static void Protocol_K230_ProcessCompleteLine(void)
 {
     K230_TargetFrame frame;

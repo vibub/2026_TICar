@@ -1,8 +1,16 @@
+/**
+ * @file protocol_tjc.c
+ * @brief 处理 TJC 单字节模式命令，并发送带 XOR 校验的五字节状态响应。
+ */
 #include "protocol_tjc.h"
 
 #include "app_main.h"
 #include "bsp_uart.h"
 
+/*
+ * CCS Watch 协议统计：接收/合法/非法命令数、响应数、BSP 缓冲溢出和 UART 错误镜像，
+ * 以及最近一次原始命令和返回结果码。
+ */
 volatile uint32_t g_tjc_rx_byte_count;
 volatile uint32_t g_tjc_valid_command_count;
 volatile uint32_t g_tjc_invalid_command_count;
@@ -12,6 +20,7 @@ volatile uint32_t g_tjc_rx_error_count;
 volatile uint8_t g_tjc_last_command;
 volatile uint8_t g_tjc_last_result;
 
+/* 初始化统计并丢弃启用协议任务前已经积压的屏幕字节。 */
 void Protocol_Tjc_Init(void)
 {
     g_tjc_rx_byte_count = 0U;
@@ -25,6 +34,10 @@ void Protocol_Tjc_Init(void)
     Bsp_Uart_Tjc_FlushRx();
 }
 
+/*
+ * 响应帧格式：A5 | RESULT | CURRENT | REQUEST | XOR。
+ * CHECKSUM 是前四字节异或；current 是已生效模式，request 是触发该响应的原始命令。
+ */
 void Protocol_Tjc_SendResult(Tjc_Result result, uint8_t current_mode, uint8_t request)
 {
     uint8_t frame[5];
@@ -39,6 +52,10 @@ void Protocol_Tjc_SendResult(Tjc_Result result, uint8_t current_mode, uint8_t re
     g_tjc_response_count++;
 }
 
+/*
+ * 从 ISR 环形缓冲中尽可能取完当前命令：QUERY 立即返回状态，0～13 提交异步模式请求，
+ * 其余字节返回非法命令。模式请求受理后的最终切换结果由 app_main.c 稍后发送。
+ */
 void Protocol_Tjc_Task(void)
 {
     uint8_t command;

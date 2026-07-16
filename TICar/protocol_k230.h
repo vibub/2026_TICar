@@ -1,20 +1,28 @@
+/**
+ * @file protocol_k230.h
+ * @brief K230 目标文本协议的数据结构、调试量和非阻塞解析接口。
+ */
 #ifndef PROTOCOL_K230_H
 #define PROTOCOL_K230_H
 
 #include <stdint.h>
 
-#define K230_PROTOCOL_LINE_SIZE 32U
-#define K230_LINK_TIMEOUT_MS 300U
-#define K230_MIN_CONFIDENCE 70U
+#define K230_PROTOCOL_LINE_SIZE 32U /* 含字符串结束符的最大行缓冲区大小。 */
+#define K230_LINK_TIMEOUT_MS 300U  /* 超过 300 ms 无完整有效帧即判定链路超时。 */
+#define K230_MIN_CONFIDENCE 70U    /* 低于该置信度的 T 帧不参与云台控制。 */
 
+/** K230 解析后的目标帧；X/Y 范围分别为 ±320、±180，confidence 范围为 0～100。 */
 typedef struct {
-    uint8_t detected;
-    int16_t error_x;
-    int16_t error_y;
-    uint8_t confidence;
+    uint8_t detected;   /* 1 表示 T 帧检测到目标，0 表示 N 帧无目标。 */
+    int16_t error_x;    /* 目标相对图像中心的水平像素误差。 */
+    int16_t error_y;    /* 目标相对图像中心的垂直像素误差。 */
+    uint8_t confidence; /* 整数置信度。 */
 } K230_TargetFrame;
 
-/* 供 CCS Watch 观察的协议调试变量。 */
+/*
+ * 供 CCS Watch 观察的协议状态：最新帧、有效/无效帧数、接收字节数、链路/目标有效性、
+ * 最近有效帧毫秒时间戳和累计超时次数。
+ */
 extern volatile K230_TargetFrame g_k230_latest_frame;
 extern volatile uint32_t g_k230_valid_frame_count;
 extern volatile uint32_t g_k230_invalid_frame_count;
@@ -52,7 +60,7 @@ uint8_t Protocol_K230_ParseLine(
 /**
  * 获取最近收到的新数据帧。
  *
- * 返回 1 表示存在新帧，并将新帧写入 frame。
+ * 返回 1 表示存在新帧，并将新帧写入 frame；成功读取会清除“新帧”标志。
  * 返回 0 表示自上次读取后没有新帧。
  */
 uint8_t Protocol_K230_TakeLatestFrame(K230_TargetFrame *frame);
