@@ -19,9 +19,9 @@
 #define APP_MOTOR_TEST_FAST_SPEED 0.45f // Fast wheel command for visible left/right mapping checks.
 #define APP_CCD_PRINT_DELAY (CPUCLK_FREQ / 2U) // Print CCD frames at 2 Hz so UART output stays readable.
 #define APP_CCD_LOG_FRAME_COUNT 32U // Keep a small RAM log that can be exported through the debugger.
-#define APP_LINE_BASE_SPEED 0.35f // Track-tested straight speed for the frozen line-follow baseline.
+#define APP_LINE_BASE_SPEED 0.49f // Slightly faster square-track straight speed after corner timing was stabilized.
 #define APP_LINE_BASE_TARGET_CM_S 30.0f // Map the frozen 0.35 straight reference to the verified 30 cm/s wheel target.
-#define APP_LINE_KP 0.0025f // STM32-style PD proportional gain for visible recovery in bends.
+#define APP_LINE_KP 0.0020f // STM32-style PD proportional gain for visible recovery in bends.
 #define APP_LINE_KD 0.0005f // Smaller derivative reduces correction flips from CCD target jitter.
 #define APP_LINE_STEER_LIMIT 0.130f // Stronger bend steering without direction lock.
 #define APP_LINE_MEDIUM_MIN_STEER 0.020f // Keep medium-error correction from kicking the car on straights.
@@ -46,6 +46,78 @@
 #define APP_LINE_LOST_RECOVER_MAX 8U // Keep lost-line recovery short so straight segments do not weave.
 #define APP_LINE_LOST_SPEED_SCALE 0.55f // Slow down during lost-line recovery so the CCD has time to reacquire.
 #define APP_LINE_LOST_TURN 0.040f // Keep lost-line recovery gentle so straight segments do not weave.
+#define APP_SQUARE_BASE_SPEED APP_LINE_BASE_SPEED // Keep the known-good straight baseline for square-track testing.
+#define APP_SQUARE_KP APP_LINE_KP // Preserve the current stable steering gain instead of re-softening the loop.
+#define APP_SQUARE_KD APP_LINE_KD // Preserve the current stable derivative gain.
+#define APP_SQUARE_STEER_SIGN APP_LINE_STEER_SIGN // Keep square mode aligned with the verified motor mapping.
+#define APP_SQUARE_STEER_LIMIT APP_LINE_STEER_LIMIT // Keep normal steering authority unchanged on straight segments.
+#define APP_SQUARE_MEDIUM_ERROR APP_LINE_MEDIUM_ERROR // Reuse the stable medium-error threshold.
+#define APP_SQUARE_LARGE_ERROR APP_LINE_LARGE_ERROR // Reuse the stable large-error threshold.
+#define APP_SQUARE_LOOP_DELAY APP_LINE_LOOP_DELAY // Keep the square follow loop at the same 50 Hz rate.
+#define APP_SQUARE_MEDIUM_SPEED_SCALE APP_LINE_MEDIUM_SPEED_SCALE // Keep medium correction behavior unchanged.
+#define APP_SQUARE_LARGE_SPEED_SCALE APP_LINE_LARGE_SPEED_SCALE // Keep large-error speed behavior unchanged.
+#define APP_SQUARE_MEDIUM_MIN_STEER APP_LINE_MEDIUM_MIN_STEER // Keep straightaway correction unchanged.
+#define APP_SQUARE_LARGE_MIN_STEER APP_LINE_LARGE_MIN_STEER // Keep large-error correction unchanged.
+#define APP_SQUARE_LOST_RECOVER_MAX 14U // Search longer only in square mode for brief 90-degree corner dropouts.
+#define APP_SQUARE_LOST_SPEED_SCALE 0.45f // Slow square-mode lost-line recovery without forcing an abrupt pivot.
+#define APP_SQUARE_LOST_TURN 0.060f // Turn more than normal line mode, but less aggressively than the failed test.
+#define APP_SQUARE_CORNER_ENTER_ERROR 32 // Wait until the center is closer to disappearing before entering a square corner.
+#define APP_SQUARE_CORNER_EXIT_ERROR 5 // Resume normal follow after the black line returns near center.
+#define APP_SQUARE_CORNER_MISSING_LOOPS 3U // Confirm the center is missing for about 60 ms before stopping to turn.
+#define APP_SQUARE_CORNER_BRAKE_LOOPS 5U // Stop for about 100 ms before pivoting into a right-angle turn.
+#define APP_SQUARE_CORNER_MAX_PIVOT_LOOPS 90U // Safety exit after about 1.8 s if center is not reacquired.
+#define APP_SQUARE_CORNER_PIVOT_SPEED 0.16f // In-place turn command while searching for the centered line.
+#define APP_SQUARE_CORNER_DEFAULT_DIRECTION -1 // Square track is counter-clockwise, so prefer left search when center is lost.
+
+#if APP_MODE == APP_MODE_SQUARE_FOLLOW
+#define APP_FOLLOW_BASE_SPEED APP_SQUARE_BASE_SPEED
+#define APP_FOLLOW_KP APP_SQUARE_KP
+#define APP_FOLLOW_KD APP_SQUARE_KD
+#define APP_FOLLOW_STEER_SIGN APP_SQUARE_STEER_SIGN
+#define APP_FOLLOW_STEER_LIMIT APP_SQUARE_STEER_LIMIT
+#define APP_FOLLOW_MEDIUM_ERROR APP_SQUARE_MEDIUM_ERROR
+#define APP_FOLLOW_LARGE_ERROR APP_SQUARE_LARGE_ERROR
+#define APP_FOLLOW_LOOP_DELAY APP_SQUARE_LOOP_DELAY
+#define APP_FOLLOW_MEDIUM_SPEED_SCALE APP_SQUARE_MEDIUM_SPEED_SCALE
+#define APP_FOLLOW_LARGE_SPEED_SCALE APP_SQUARE_LARGE_SPEED_SCALE
+#define APP_FOLLOW_MEDIUM_MIN_STEER APP_SQUARE_MEDIUM_MIN_STEER
+#define APP_FOLLOW_LARGE_MIN_STEER APP_SQUARE_LARGE_MIN_STEER
+#define APP_FOLLOW_LOST_RECOVER_MAX APP_SQUARE_LOST_RECOVER_MAX
+#define APP_FOLLOW_LOST_SPEED_SCALE APP_SQUARE_LOST_SPEED_SCALE
+#define APP_FOLLOW_LOST_TURN APP_SQUARE_LOST_TURN
+#elif APP_MODE == APP_MODE_CIRCLE_FOLLOW
+#define APP_FOLLOW_BASE_SPEED APP_CIRCLE_BASE_SPEED
+#define APP_FOLLOW_KP APP_CIRCLE_KP
+#define APP_FOLLOW_KD APP_CIRCLE_KD
+#define APP_FOLLOW_STEER_SIGN APP_CIRCLE_STEER_SIGN
+#define APP_FOLLOW_STEER_LIMIT APP_CIRCLE_STEER_LIMIT
+#define APP_FOLLOW_MEDIUM_ERROR APP_CIRCLE_MEDIUM_ERROR
+#define APP_FOLLOW_LARGE_ERROR APP_CIRCLE_LARGE_ERROR
+#define APP_FOLLOW_LOOP_DELAY APP_CIRCLE_LOOP_DELAY
+#define APP_FOLLOW_MEDIUM_SPEED_SCALE APP_LINE_MEDIUM_SPEED_SCALE
+#define APP_FOLLOW_LARGE_SPEED_SCALE APP_LINE_LARGE_SPEED_SCALE
+#define APP_FOLLOW_MEDIUM_MIN_STEER APP_LINE_MEDIUM_MIN_STEER
+#define APP_FOLLOW_LARGE_MIN_STEER APP_LINE_LARGE_MIN_STEER
+#define APP_FOLLOW_LOST_RECOVER_MAX APP_LINE_LOST_RECOVER_MAX
+#define APP_FOLLOW_LOST_SPEED_SCALE APP_LINE_LOST_SPEED_SCALE
+#define APP_FOLLOW_LOST_TURN APP_LINE_LOST_TURN
+#else
+#define APP_FOLLOW_BASE_SPEED APP_LINE_BASE_SPEED
+#define APP_FOLLOW_KP APP_LINE_KP
+#define APP_FOLLOW_KD APP_LINE_KD
+#define APP_FOLLOW_STEER_SIGN APP_LINE_STEER_SIGN
+#define APP_FOLLOW_STEER_LIMIT APP_LINE_STEER_LIMIT
+#define APP_FOLLOW_MEDIUM_ERROR APP_LINE_MEDIUM_ERROR
+#define APP_FOLLOW_LARGE_ERROR APP_LINE_LARGE_ERROR
+#define APP_FOLLOW_LOOP_DELAY APP_LINE_LOOP_DELAY
+#define APP_FOLLOW_MEDIUM_SPEED_SCALE APP_LINE_MEDIUM_SPEED_SCALE
+#define APP_FOLLOW_LARGE_SPEED_SCALE APP_LINE_LARGE_SPEED_SCALE
+#define APP_FOLLOW_MEDIUM_MIN_STEER APP_LINE_MEDIUM_MIN_STEER
+#define APP_FOLLOW_LARGE_MIN_STEER APP_LINE_LARGE_MIN_STEER
+#define APP_FOLLOW_LOST_RECOVER_MAX APP_LINE_LOST_RECOVER_MAX
+#define APP_FOLLOW_LOST_SPEED_SCALE APP_LINE_LOST_SPEED_SCALE
+#define APP_FOLLOW_LOST_TURN APP_LINE_LOST_TURN
+#endif
 #define APP_ENCODER_WATCH_DELAY (CPUCLK_FREQ / 50U) // Sample encoder counts around 50 Hz for debugger inspection.
 #define APP_SPEED_TEST_LOW_CM_S 20.0f // First and final speed in the automatic step-response test.
 #define APP_SPEED_TEST_HIGH_CM_S 30.0f // Middle speed in the automatic step-response test.
@@ -80,7 +152,8 @@ volatile uint32_t g_k230_follow_update_count = 0U; // Count valid target frames 
 #endif
 
 #if (APP_MODE == APP_MODE_ENCODER_WATCH) || (APP_MODE == APP_MODE_SPEED_TEST) || \
-    (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW)
+    (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || \
+    (APP_MODE == APP_MODE_SQUARE_FOLLOW)
 volatile int32_t g_encoder_left_count = 0; // Watch this value for logical-left accumulated encoder ticks.
 volatile int32_t g_encoder_right_count = 0; // Watch this value for logical-right accumulated encoder ticks.
 volatile int16_t g_encoder_left_speed = 0; // Watch this value for logical-left ticks in the latest sample window.
@@ -146,7 +219,8 @@ volatile uint16_t g_debug_ccd_log_filled = 0U; // Watch this value; 32 means the
 volatile App_CcdLogFrame g_debug_ccd_log[APP_CCD_LOG_FRAME_COUNT]; // Export this RAM block through CCS Memory Browser for CSV conversion.
 #endif
 
-#if (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CCD_STRAIGHT) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW)
+#if (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CCD_STRAIGHT) || \
+    (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_SQUARE_FOLLOW)
 volatile uint8_t g_line_valid = 0U; // Watch this value; 1 means line-follow is actively driving.
 volatile int16_t g_line_target = -1; // Watch this value for the latest CCD target used by steering.
 volatile int16_t g_line_error = 0; // Watch this value for the latest centered CCD error.
@@ -169,6 +243,15 @@ static int16_t g_line_last_error = 0; // Keep the previous fixed-center error fo
 static float g_line_last_correction = 0.0f; // Smooth steering output so CCD jitter does not kick the chassis.
 #endif
 
+#if APP_MODE == APP_MODE_SQUARE_FOLLOW
+volatile uint8_t g_square_corner_state = 0U; // 0 normal, 1 braking, 2 pivoting until the line returns to center.
+volatile uint32_t g_square_corner_count = 0U; // Watch how many 20 ms loops have elapsed in the current corner state.
+volatile int8_t g_square_corner_direction = 0; // -1 pivots left, +1 pivots right.
+volatile uint32_t g_square_corner_entry_count = 0U; // Count detected square-corner entries for tuning.
+volatile uint8_t g_square_seen_center_line = 0U; // 1 after a real centered black region has been detected.
+volatile uint8_t g_square_center_missing_count = 0U; // Debounce early corner entry when the line only briefly shifts.
+#endif
+
 #if APP_MODE == APP_MODE_UART_TEST
 static void App_SendUint32(uint32_t value)
 {
@@ -188,7 +271,8 @@ static void App_SendUint32(uint32_t value)
 }
 #endif
 
-#if (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW)
+#if (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || \
+    (APP_MODE == APP_MODE_SQUARE_FOLLOW)
 static float App_LimitFloat(float value, float limit)
 {
     if (value > limit) {
@@ -415,7 +499,9 @@ void App_Init(void)
     g_app_debug_mode = APP_MODE; // Write the mode at runtime so CCS Watch can verify the loaded firmware.
     Bsp_Gpio_Init();
     Bsp_Uart_Init();
-#if (APP_MODE == APP_MODE_MOTOR_PWM) || (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CCD_STRAIGHT) || (APP_MODE == APP_MODE_SPEED_TEST) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW)
+#if (APP_MODE == APP_MODE_MOTOR_PWM) || (APP_MODE == APP_MODE_LINE_FOLLOW) || \
+    (APP_MODE == APP_MODE_CCD_STRAIGHT) || (APP_MODE == APP_MODE_SPEED_TEST) || \
+    (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_SQUARE_FOLLOW)
     Bsp_Motor_Init();
 #else
     Bsp_Motor_Disable(); // Non-motor debug modes must keep PWM and H-bridge outputs idle.
@@ -434,11 +520,13 @@ void App_Init(void)
 #elif (APP_MODE != APP_MODE_UART_TEST) && (APP_MODE != APP_MODE_CCD_WATCH) && (APP_MODE != APP_MODE_K230_UART)
     Bsp_Ptz_Disable(); // Full SysConfig modes that do not use the PTZ must force both servo signals low.
 #endif
-#if (APP_MODE == APP_MODE_ENCODER_WATCH) || (APP_MODE == APP_MODE_SPEED_TEST)
+#if (APP_MODE == APP_MODE_ENCODER_WATCH) || (APP_MODE == APP_MODE_SPEED_TEST) || \
+    (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || \
+    (APP_MODE == APP_MODE_SQUARE_FOLLOW)
     Bsp_Motor_EncoderInit(); // Enable 2025-board encoder pins PB13/PB20 and PB15/PB17.
 #endif
 #if (APP_MODE == APP_MODE_SPEED_TEST) || (APP_MODE == APP_MODE_LINE_FOLLOW) || \
-    (APP_MODE == APP_MODE_CIRCLE_FOLLOW)
+    (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_SQUARE_FOLLOW)
     Bsp_Motor_SpeedPidInit(); // Prepare both wheel-speed PI controllers before closed-loop driving.
 #endif
 #if APP_MODE == APP_MODE_CCD_ADC
@@ -446,7 +534,8 @@ void App_Init(void)
     Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC before the first frame read.
 #elif APP_MODE == APP_MODE_CCD_WATCH
     Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC for debugger-watch CCD sampling.
-#elif (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_LINE_FOLLOW)
+#elif (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_LINE_FOLLOW) || \
+    (APP_MODE == APP_MODE_SQUARE_FOLLOW)
     Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC before the single line-follow controller.
     Bsp_Gpio_SetHeartbeat(0U); // Keep the heartbeat under loop control during CCD bringup.
 #elif APP_MODE == APP_MODE_CCD_STRAIGHT
@@ -496,7 +585,8 @@ void App_Loop(void)
     App_UpdateCcdWatchData(); // Copy CCD results to volatile globals for CCS Watch/Expressions.
     Bsp_Gpio_ToggleHeartbeat(); // LED heartbeat confirms frames are updating without UART.
     delay_cycles(APP_CCD_PRINT_DELAY);
-#elif (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_LINE_FOLLOW)
+#elif (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_LINE_FOLLOW) || \
+    (APP_MODE == APP_MODE_SQUARE_FOLLOW)
     Bsp_Ccd_ReadFrame(); // Capture the latest line position before each CCD steering update.
     Bsp_Ccd_Process(); // Convert CCD pixels into a valid flag and centered error.
     g_line_raw_min = Bsp_Ccd_GetRawMin();
@@ -504,32 +594,129 @@ void App_Loop(void)
     g_line_raw_min_index = Bsp_Ccd_GetRawMinIndex();
     g_line_raw_max_index = Bsp_Ccd_GetRawMaxIndex();
     g_line_contrast = Bsp_Ccd_GetContrast(); // Keep illumination diagnostics visible on both valid and lost frames.
+#if APP_MODE == APP_MODE_SQUARE_FOLLOW
+    uint8_t square_corner_handled = 0U;
+    uint8_t square_line_valid = Bsp_Ccd_IsLineValid();
+    int16_t square_line_error = Bsp_Ccd_GetLineError();
+    int16_t square_abs_error = (square_line_error < 0) ?
+                               (int16_t) (-square_line_error) :
+                               square_line_error;
+    uint16_t square_black_width = Bsp_Ccd_GetBlackWidth();
+    uint8_t square_center_detected = ((square_line_valid != 0U) &&
+                                      (square_black_width != 0U) &&
+                                      (square_abs_error < APP_SQUARE_CORNER_ENTER_ERROR)) ?
+                                     1U :
+                                     0U;
+    uint8_t square_center_missing = ((square_line_valid == 0U) ||
+                                     (square_black_width == 0U) ||
+                                     (square_abs_error >= APP_SQUARE_CORNER_ENTER_ERROR)) ?
+                                    1U :
+                                    0U;
+    float square_corner_left_cmd = 0.0f;
+    float square_corner_right_cmd = 0.0f;
+
+    if (square_center_detected != 0U) {
+        g_square_seen_center_line = 1U;
+        g_square_center_missing_count = 0U;
+    } else if (square_center_missing != 0U) {
+        if (g_square_center_missing_count < APP_SQUARE_CORNER_MISSING_LOOPS) {
+            g_square_center_missing_count++;
+        }
+    }
+
+    if ((g_square_corner_state == 0U) &&
+        (g_square_seen_center_line != 0U) &&
+        (g_square_center_missing_count >= APP_SQUARE_CORNER_MISSING_LOOPS)) {
+        g_square_corner_state = 1U;
+        g_square_corner_count = 0U;
+        g_square_center_missing_count = 0U;
+        g_square_corner_direction = APP_SQUARE_CORNER_DEFAULT_DIRECTION;
+        g_square_corner_entry_count++;
+        Bsp_Motor_SpeedPidStop();
+        g_line_last_correction = 0.0f;
+        square_corner_handled = 1U;
+    }
+
+    if ((g_square_corner_state != 0U) && (square_corner_handled == 0U)) {
+        if ((square_line_valid != 0U) &&
+            (square_black_width != 0U) &&
+            (square_abs_error <= APP_SQUARE_CORNER_EXIT_ERROR)) {
+            g_square_corner_state = 0U;
+            g_square_corner_count = 0U;
+            g_line_lost_count = 0U;
+            g_line_last_error = square_line_error;
+            g_line_last_correction = 0.0f;
+            g_square_seen_center_line = 1U;
+        } else if (g_square_corner_state == 1U) {
+            Bsp_Motor_SpeedPidStop();
+            g_square_corner_count++;
+            if (g_square_corner_count >= APP_SQUARE_CORNER_BRAKE_LOOPS) {
+                g_square_corner_state = 2U;
+                g_square_corner_count = 0U;
+            }
+            square_corner_handled = 1U;
+        } else {
+            float left_cmd;
+            float right_cmd;
+            float pivot = APP_SQUARE_CORNER_PIVOT_SPEED *
+                          (float) g_square_corner_direction;
+
+            left_cmd = pivot;
+            right_cmd = -pivot;
+            App_LineApplySpeedPid(left_cmd, right_cmd);
+            square_corner_left_cmd = left_cmd;
+            square_corner_right_cmd = right_cmd;
+            g_square_corner_count++;
+            if (g_square_corner_count >= APP_SQUARE_CORNER_MAX_PIVOT_LOOPS) {
+                g_square_corner_state = 0U;
+                g_square_corner_count = 0U;
+                g_line_last_correction = 0.0f;
+            }
+            square_corner_handled = 1U;
+        }
+
+        g_line_valid = square_line_valid;
+        g_line_target = square_line_valid ? Bsp_Ccd_GetTargetIndex() : -1;
+        g_line_error = square_line_valid ? square_line_error : g_line_last_error;
+        g_line_error_delta = 0;
+        g_line_dx_max = Bsp_Ccd_GetDxMax();
+        g_line_dx_min = Bsp_Ccd_GetDxMin();
+        g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex();
+        g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex();
+        g_line_correction = 0.0f;
+        g_line_left_cmd = square_corner_left_cmd;
+        g_line_right_cmd = square_corner_right_cmd;
+    }
+
+    if ((square_corner_handled == 0U) && (Bsp_Ccd_IsLineValid() != 0U)) {
+#else
     if (Bsp_Ccd_IsLineValid() != 0U) {
+#endif
         int16_t line_error = Bsp_Ccd_GetLineError();
         int16_t error_delta = (int16_t) (line_error - g_line_last_error);
         int16_t abs_error = (line_error < 0) ? (int16_t) (-line_error) : line_error;
-        float base_speed = APP_CIRCLE_BASE_SPEED;
-        float steer_limit = APP_CIRCLE_STEER_LIMIT;
+        float base_speed = APP_FOLLOW_BASE_SPEED;
+        float steer_limit = APP_FOLLOW_STEER_LIMIT;
         float min_steer = 0.0f;
-        float correction = APP_CIRCLE_STEER_SIGN *
-                           ((APP_CIRCLE_KP * (float) line_error) +
-                            (APP_CIRCLE_KD * (float) error_delta));
+        float correction = APP_FOLLOW_STEER_SIGN *
+                           ((APP_FOLLOW_KP * (float) line_error) +
+                            (APP_FOLLOW_KD * (float) error_delta));
         float left_cmd;
         float right_cmd;
 
         if (abs_error <= APP_LINE_DEADBAND_ERROR) {
             correction = 0.0f; // Keep center-line jitter from causing visible dithering.
             error_delta = 0; // Keep the derivative Watch value quiet inside the deadband.
-        } else if (abs_error >= APP_CIRCLE_LARGE_ERROR) {
-            base_speed = APP_CIRCLE_BASE_SPEED * APP_LINE_LARGE_SPEED_SCALE; // Slow aggressively on large errors so bends do not run wide.
-            steer_limit = APP_CIRCLE_STEER_LIMIT; // Keep full steering authority during recovery.
-            min_steer = APP_LINE_LARGE_MIN_STEER; // Force enough steering before the car runs wide.
-        } else if (abs_error >= APP_CIRCLE_MEDIUM_ERROR) {
-            base_speed = APP_CIRCLE_BASE_SPEED * APP_LINE_MEDIUM_SPEED_SCALE; // Slow earlier on medium errors.
-            steer_limit = APP_CIRCLE_STEER_LIMIT * 0.75f; // Moderate correction before the error becomes large.
-            min_steer = APP_LINE_MEDIUM_MIN_STEER; // Make medium-error correction visible on the chassis.
+        } else if (abs_error >= APP_FOLLOW_LARGE_ERROR) {
+            base_speed = APP_FOLLOW_BASE_SPEED * APP_FOLLOW_LARGE_SPEED_SCALE; // Slow aggressively on large errors so bends do not run wide.
+            steer_limit = APP_FOLLOW_STEER_LIMIT; // Keep full steering authority during recovery.
+            min_steer = APP_FOLLOW_LARGE_MIN_STEER; // Force enough steering before the car runs wide.
+        } else if (abs_error >= APP_FOLLOW_MEDIUM_ERROR) {
+            base_speed = APP_FOLLOW_BASE_SPEED * APP_FOLLOW_MEDIUM_SPEED_SCALE; // Slow earlier on medium errors.
+            steer_limit = APP_FOLLOW_STEER_LIMIT * 0.75f; // Moderate correction before the error becomes large.
+            min_steer = APP_FOLLOW_MEDIUM_MIN_STEER; // Make medium-error correction visible on the chassis.
         } else {
-            steer_limit = APP_CIRCLE_STEER_LIMIT * 0.45f; // Keep tiny corrections gentle near the center line.
+            steer_limit = APP_FOLLOW_STEER_LIMIT * 0.45f; // Keep tiny corrections gentle near the center line.
         }
 
         if (line_error > 0) {
@@ -540,8 +727,8 @@ void App_Loop(void)
 
         if ((min_steer > 0.0f) && (correction < min_steer) && (correction > -min_steer)) {
             correction = (line_error > 0) ?
-                         (APP_CIRCLE_STEER_SIGN * min_steer) :
-                         (-APP_CIRCLE_STEER_SIGN * min_steer);
+                         (APP_FOLLOW_STEER_SIGN * min_steer) :
+                         (-APP_FOLLOW_STEER_SIGN * min_steer);
         }
 
         correction = App_LimitFloat(correction, steer_limit);
@@ -566,17 +753,23 @@ void App_Loop(void)
         g_line_right_cmd = right_cmd; // Mirror right command for Watch/Expressions.
         g_line_last_error = line_error; // Store current error for the next derivative update.
         g_line_last_correction = correction; // Store smoothed steering for the next slew-limit step.
-    } else {
+    }
+#if APP_MODE == APP_MODE_SQUARE_FOLLOW
+    else if (square_corner_handled == 0U) {
+        g_line_recover_direction = APP_SQUARE_CORNER_DEFAULT_DIRECTION;
+#else
+    else {
+#endif
         float left_cmd = 0.0f;
         float right_cmd = 0.0f;
         float correction = 0.0f;
 
-        if ((g_line_lost_count < APP_LINE_LOST_RECOVER_MAX) &&
+        if ((g_line_lost_count < APP_FOLLOW_LOST_RECOVER_MAX) &&
             (g_line_recover_direction != 0)) {
-            float base_speed = APP_CIRCLE_BASE_SPEED * APP_LINE_LOST_SPEED_SCALE;
+            float base_speed = APP_FOLLOW_BASE_SPEED * APP_FOLLOW_LOST_SPEED_SCALE;
 
-            correction = APP_CIRCLE_STEER_SIGN *
-                         APP_LINE_LOST_TURN *
+            correction = APP_FOLLOW_STEER_SIGN *
+                         APP_FOLLOW_LOST_TURN *
                          (float) g_line_recover_direction;
             correction = App_LimitFloatDelta(correction,
                                              g_line_last_correction,
@@ -602,7 +795,7 @@ void App_Loop(void)
         g_line_last_correction = correction; // Keep lost-line recovery continuous with valid steering.
     }
     Bsp_Gpio_ToggleHeartbeat(); // Heartbeat confirms the CCD line-follow loop is running.
-    delay_cycles(APP_CIRCLE_LOOP_DELAY);
+    delay_cycles(APP_FOLLOW_LOOP_DELAY);
 #elif APP_MODE == APP_MODE_CCD_STRAIGHT
     Bsp_Ccd_ReadFrame(); // Capture the latest line position before straight-only gating.
     Bsp_Ccd_Process(); // Detect whether a valid black line exists without using error for steering.
