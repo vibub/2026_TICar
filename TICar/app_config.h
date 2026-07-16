@@ -1,6 +1,7 @@
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
 
+#define APP_MODE_STOPPED 0
 #define APP_MODE_HEARTBEAT 1
 #define APP_MODE_K230_UART 2
 #define APP_MODE_MOTOR_PWM 3
@@ -15,6 +16,7 @@
 #define APP_MODE_K230_FOLLOW 12
 #define APP_MODE_SQUARE_FOLLOW 13
 
-#define APP_MODE APP_MODE_SQUARE_FOLLOW
+/* 保留原编译模式值供历史调试参考；运行时上电固定进入 APP_MODE_STOPPED。 */
+#define APP_MODE APP_MODE_K230_UART
 
 #endif

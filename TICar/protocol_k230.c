@@ -37,8 +37,6 @@ void Protocol_K230_Init(void)
     g_k230_latest_frame.error_x = 0;
     g_k230_latest_frame.error_y = 0;
     g_k230_latest_frame.confidence = 0U;
-
-    Bsp_Time_Init();
 }
 
 uint8_t Protocol_K230_ParseLine(
