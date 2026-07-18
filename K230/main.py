@@ -45,7 +45,8 @@ def select_best_target(result):
 
     box = boxes[best_index]
 
-    # YOLO11 video模式返回显示坐标系中的[x, y, width, height]。
+    # YOLO11 video 模式返回 rgb888p_size 视觉坐标系中的
+    # [x, y, width, height]，这里不能再按显示分辨率进行二次缩放。
     return (
         int(box[0]),
         int(box[1]),
@@ -57,13 +58,12 @@ def select_best_target(result):
 
 def display_box_to_vision_bounds(target):
     x, y, width, height, confidence = target
-    scale_x = VISION_SIZE[0] / DISPLAY_SIZE[0]
-    scale_y = VISION_SIZE[1] / DISPLAY_SIZE[1]
 
-    x1 = int(x * scale_x)
-    y1 = int(y * scale_y)
-    x2 = int((x + width) * scale_x)
-    y2 = int((y + height) * scale_y)
+    # 检测框已经位于 640×360 视觉坐标系，直接计算边界并限制范围。
+    x1 = int(x)
+    y1 = int(y)
+    x2 = int(x + width)
+    y2 = int(y + height)
 
     x1 = max(0, min(VISION_SIZE[0] - 1, x1))
     y1 = max(0, min(VISION_SIZE[1] - 1, y1))

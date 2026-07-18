@@ -485,6 +485,15 @@ static void App_K230Follow_Task(void)
     if ((uint32_t) (Bsp_Time_GetMilliseconds() - g_k230_follow_start_ms) <
         APP_K230_FOLLOW_STARTUP_HOLD_MS) {
         (void) Protocol_K230_TakeLatestFrame(&frame); // 丢弃启动阶段旧帧，保持结束后只响应新目标。
+
+        /*
+         * 启动阶段持续写入中心命令，使 K230 已经通信时也必须先完成回中。
+         * 同步软件保存值，保证两秒后的第一次跟随增量从中心位置开始计算。
+         */
+        g_k230_pan_compare = BSP_PTZ_PAN_CENTER;
+        g_k230_tilt_compare = BSP_PTZ_TILT_CENTER;
+        Bsp_Ptz_SetCompare(g_k230_tilt_compare, g_k230_pan_compare);
+
         g_k230_follow_seen_timeout_count = g_k230_timeout_count; // 启动阶段的历史超时不能在两秒后误关闭已恢复链路。
         g_k230_control_error_x = 0;
         g_k230_control_error_y = 0;
