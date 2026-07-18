@@ -135,7 +135,7 @@
 #define APP_K230_FOLLOW_PAN_MAX_STEP 20 // 每个新目标帧最多改变 20 个 Pan compare，减小单帧角度跳变。
 #define APP_K230_FOLLOW_TILT_MAX_STEP 15 // 每个新目标帧最多改变 15 个 Tilt compare，减小单帧角度跳变。
 #define APP_K230_FOLLOW_PAN_DIRECTION (-1) // 正 error_x 使 Pan compare 减小。
-#define APP_K230_FOLLOW_TILT_DIRECTION 1 // 正 error_y 使 Tilt compare 增大。
+#define APP_K230_FOLLOW_TILT_DIRECTION (-1) // 正 error_y 时减小 Tilt compare，使云台向下追踪并形成负反馈。
 #define APP_K230_FOLLOW_STARTUP_HOLD_MS 2000U // 上电后两秒内保持双轴初始化位置。
 #define APP_K230_FOLLOW_STATE_WAIT_LINK 0U
 #define APP_K230_FOLLOW_STATE_TRACKING 1U
