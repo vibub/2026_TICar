@@ -5,6 +5,7 @@
 #include "bsp_gpio.h"
 #include "bsp_motor.h"
 #include "bsp_ptz.h"
+#include "bsp_time.h"
 #include "bsp_uart.h"
 #include "pid.h"
 #include "protocol_k230.h"
@@ -131,7 +132,8 @@
 #define APP_K230_FOLLOW_PAN_MAX_STEP 20 // Limit Pan movement produced by one new K230 frame.
 #define APP_K230_FOLLOW_TILT_MAX_STEP 15 // Limit Tilt movement produced by one new K230 frame.
 #define APP_K230_FOLLOW_PAN_DIRECTION (-1) // Positive error_x initially commands a lower Pan compare.
-#define APP_K230_FOLLOW_TILT_DIRECTION 1 // Positive error_y initially commands a higher Tilt compare.
+#define APP_K230_FOLLOW_TILT_DIRECTION (-1) // Positive error_y initially commands a lower Tilt compare.
+#define APP_K230_FOLLOW_STARTUP_HOLD_MS 2000U // Hold both axes at their calibrated centers for two seconds after startup.
 #define APP_K230_FOLLOW_STATE_WAIT_LINK 0U
 #define APP_K230_FOLLOW_STATE_TRACKING 1U
 #define APP_K230_FOLLOW_STATE_HOLD 2U
@@ -141,6 +143,7 @@ volatile uint32_t g_app_debug_mode = 0U; // Watch this value to confirm the runn
 
 #if APP_MODE == APP_MODE_K230_FOLLOW
 static uint32_t g_k230_follow_seen_timeout_count;
+static uint32_t g_k230_follow_start_ms;
 volatile int16_t g_k230_control_error_x = 0; // Watch the horizontal error after validity and deadband filtering.
 volatile int16_t g_k230_control_error_y = 0; // Watch the vertical error after validity and deadband filtering.
 volatile int16_t g_k230_pan_delta = 0; // Watch the actual Pan compare change applied for the latest valid target frame.
@@ -472,6 +475,17 @@ static void App_K230Follow_Task(void)
 {
     K230_TargetFrame frame;
 
+    if ((uint32_t) (Bsp_Time_GetMilliseconds() - g_k230_follow_start_ms) <
+        APP_K230_FOLLOW_STARTUP_HOLD_MS) {
+        (void) Protocol_K230_TakeLatestFrame(&frame); // Discard startup frames so no stale target moves the PTZ after the hold.
+        g_k230_control_error_x = 0;
+        g_k230_control_error_y = 0;
+        g_k230_pan_delta = 0;
+        g_k230_tilt_delta = 0;
+        g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK;
+        return;
+    }
+
     if (g_k230_timeout_count != g_k230_follow_seen_timeout_count) {
         g_k230_follow_seen_timeout_count = g_k230_timeout_count;
         g_k230_control_error_x = 0;
@@ -550,6 +564,7 @@ void App_Init(void)
     Protocol_K230_Init();
 #if APP_MODE == APP_MODE_K230_FOLLOW
     g_k230_follow_seen_timeout_count = g_k230_timeout_count;
+    g_k230_follow_start_ms = Bsp_Time_GetMilliseconds();
 #endif
     PID_InitDefaults();
 }
