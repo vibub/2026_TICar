@@ -1,15 +1,24 @@
+/**
+ * @file bsp_gpio.c
+ * @brief 管理板载心跳 LED 和方形赛道直角状态指示灯。
+ *
+ * PB26 红色 LED 由代码直接配置；角点闪烁依赖巡线任务的固定调用周期。
+ */
 #include "bsp_gpio.h"
 
 #include "ti_msp_dl_config.h"
 
+/* LP-MSPM0G3507 LED2 红色通道：PB26/PINCM57，与蓝色心跳灯分离。 */
 #define BSP_GPIO_CORNER_LED_PORT GPIOB // Use LP-MSPM0G3507 LED2 red channel instead of the blue heartbeat LED.
 #define BSP_GPIO_CORNER_LED_PIN DL_GPIO_PIN_26 // PB26 drives the LaunchPad RGB red LED channel.
 #define BSP_GPIO_CORNER_LED_IOMUX IOMUX_PINCM57 // PINCM57 maps to PB26 GPIO output on MSPM0G3507.
 #define BSP_GPIO_CORNER_BLINK_DIVIDER 20U // Toggle every twenty line-loop updates so the blink is visible on short corner events.
 
+/* 软件分频计数和当前输出状态；20 次 × 20 ms 约每 400 ms 翻转一次。 */
 static uint8_t s_corner_led_blink_count = 0U; // Count line-loop updates between corner indicator toggles.
 static uint8_t s_corner_led_state = 0U; // Track the current red LED state because the indicator is software-blinked.
 
+/* PB26 未配置在 SysConfig 中，因此在 BSP 初始化时手工设为默认关闭的数字输出。 */
 void Bsp_Gpio_Init(void)
 {
     DL_GPIO_initDigitalOutput(BSP_GPIO_CORNER_LED_IOMUX); // Configure PB26 red LED without editing SysConfig.
@@ -43,6 +52,10 @@ void Bsp_Gpio_SetCornerIndicator(uint8_t on)
     }
 }
 
+/*
+ * 正常巡线时强制熄灭；进入角点后立即点亮，再按调用次数分频闪烁。
+ * 该频率依赖应用按 20 ms 周期调用，不是独立的硬件定时器。
+ */
 void Bsp_Gpio_UpdateCornerIndicator(uint8_t corner_active)
 {
     if (corner_active == 0U) {

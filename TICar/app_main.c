@@ -1,3 +1,11 @@
+/**
+ * @file app_main.c
+ * @brief TICar 应用层运行时模式管理器和各模式的非阻塞任务实现。
+ *
+ * TJC 命令通过 App_RequestMode() 提交请求；模式管理器依次执行主动制动、旧模式退出、
+ * 公共资源复位和新模式进入。切换期间不运行模式任务，上电固定保持 APP_MODE_STOPPED。
+ * CCD、编码器和速度闭环按需初始化；本文件中的 volatile 全局量主要供 CCS Watch 观察。
+ */
 #include "app_main.h"
 
 #include "app_config.h"
@@ -9,311 +17,397 @@
 #include "bsp_uart.h"
 #include "pid.h"
 #include "protocol_k230.h"
-#include "ti/driverlib/m0p/dl_core.h"
-#include "ti_msp_dl_config.h"
+#include "protocol_tjc.h"
 
-#define APP_DELAY_1S CPUCLK_FREQ        // 1 second at the configured CPU clock.
-#define APP_DELAY_2S (2U * CPUCLK_FREQ) // 2 seconds at the configured CPU clock.
-#define APP_DELAY_PAUSE CPUCLK_FREQ     // Pause long enough to see active brake behavior.
-#define APP_STRAIGHT_TEST_SPEED 0.45f   // Start slower so left/right drift is easier to observe.
-#define APP_MOTOR_TEST_SLOW_SPEED 0.18f // Slow wheel command for visible left/right mapping checks.
-#define APP_MOTOR_TEST_FAST_SPEED 0.45f // Fast wheel command for visible left/right mapping checks.
-#define APP_CCD_PRINT_DELAY (CPUCLK_FREQ / 2U) // Print CCD frames at 2 Hz so UART output stays readable.
-#define APP_CCD_LOG_FRAME_COUNT 32U // Keep a small RAM log that can be exported through the debugger.
-#define APP_LINE_BASE_SPEED 0.49f // Slightly faster square-track straight speed after corner timing was stabilized.
-#define APP_LINE_BASE_TARGET_CM_S 30.0f // Map the frozen 0.35 straight reference to the verified 30 cm/s wheel target.
-#define APP_LINE_KP 0.0020f // STM32-style PD proportional gain for visible recovery in bends.
-#define APP_LINE_KD 0.0005f // Smaller derivative reduces correction flips from CCD target jitter.
-#define APP_LINE_STEER_LIMIT 0.130f // Stronger bend steering without direction lock.
-#define APP_LINE_MEDIUM_MIN_STEER 0.020f // Keep medium-error correction from kicking the car on straights.
-#define APP_LINE_LARGE_MIN_STEER 0.090f // Minimum recovery correction in bends before leaving the track.
-#define APP_LINE_CORRECTION_SLEW_LIMIT 0.035f // Track-tested response rate that recovers cleanly when leaving bends.
-#define APP_LINE_MEDIUM_SPEED_SCALE 0.65f // Medium-error speed is about 0.228 at the 0.35 baseline.
-#define APP_LINE_LARGE_SPEED_SCALE 0.39f // Large-error speed is about 0.137 at the 0.35 baseline.
-#define APP_LINE_DEADBAND_ERROR 5 // Keep center-line jitter from causing visible dithering.
-#define APP_LINE_MEDIUM_ERROR 6 // Start reducing base speed after a small but visible CCD offset.
-#define APP_LINE_LARGE_ERROR 12 // Treat larger CCD pixel errors as a clear recovery condition.
-#define APP_LINE_STEER_SIGN 1.0f // Keep steering sign positive after logical left/right motor mapping is fixed.
-#define APP_CCD_STRAIGHT_SPEED 0.16f // Straight-only CCD test speed uses equal wheel commands and no steering correction.
-#define APP_CIRCLE_BASE_SPEED APP_LINE_BASE_SPEED // Circle mode uses the same single CCD PD baseline.
-#define APP_CIRCLE_KP APP_LINE_KP // Reuse the stable circle-follow proportional gain.
-#define APP_CIRCLE_KD APP_LINE_KD // Reuse the stable circle-follow derivative gain.
-#define APP_CIRCLE_STEER_SIGN APP_LINE_STEER_SIGN // Keep circle sign aligned with the verified motor mapping.
-#define APP_CIRCLE_STEER_LIMIT APP_LINE_STEER_LIMIT // Reuse the clean circle-follow correction limit.
-#define APP_CIRCLE_MEDIUM_ERROR APP_LINE_MEDIUM_ERROR // Circle-mode medium-error threshold.
-#define APP_CIRCLE_LARGE_ERROR APP_LINE_LARGE_ERROR // Circle-mode large-error threshold.
-#define APP_CIRCLE_LOOP_DELAY (CPUCLK_FREQ / 50U) // Run the circle PD loop around 50 Hz.
-#define APP_LINE_LOOP_DELAY (CPUCLK_FREQ / 50U) // Run line-follow updates around 50 Hz like the STM32 reference.
-#define APP_LINE_LOST_RECOVER_MAX 8U // Keep lost-line recovery short so straight segments do not weave.
-#define APP_LINE_LOST_SPEED_SCALE 0.55f // Slow down during lost-line recovery so the CCD has time to reacquire.
-#define APP_LINE_LOST_TURN 0.040f // Keep lost-line recovery gentle so straight segments do not weave.
-#define APP_SQUARE_BASE_SPEED APP_LINE_BASE_SPEED // Keep the known-good straight baseline for square-track testing.
-#define APP_SQUARE_KP APP_LINE_KP // Preserve the current stable steering gain instead of re-softening the loop.
-#define APP_SQUARE_KD APP_LINE_KD // Preserve the current stable derivative gain.
-#define APP_SQUARE_STEER_SIGN APP_LINE_STEER_SIGN // Keep square mode aligned with the verified motor mapping.
-#define APP_SQUARE_STEER_LIMIT APP_LINE_STEER_LIMIT // Keep normal steering authority unchanged on straight segments.
-#define APP_SQUARE_MEDIUM_ERROR APP_LINE_MEDIUM_ERROR // Reuse the stable medium-error threshold.
-#define APP_SQUARE_LARGE_ERROR APP_LINE_LARGE_ERROR // Reuse the stable large-error threshold.
-#define APP_SQUARE_LOOP_DELAY APP_LINE_LOOP_DELAY // Keep the square follow loop at the same 50 Hz rate.
-#define APP_SQUARE_MEDIUM_SPEED_SCALE APP_LINE_MEDIUM_SPEED_SCALE // Keep medium correction behavior unchanged.
-#define APP_SQUARE_LARGE_SPEED_SCALE APP_LINE_LARGE_SPEED_SCALE // Keep large-error speed behavior unchanged.
-#define APP_SQUARE_MEDIUM_MIN_STEER APP_LINE_MEDIUM_MIN_STEER // Keep straightaway correction unchanged.
-#define APP_SQUARE_LARGE_MIN_STEER APP_LINE_LARGE_MIN_STEER // Keep large-error correction unchanged.
-#define APP_SQUARE_LOST_RECOVER_MAX 14U // Search longer only in square mode for brief 90-degree corner dropouts.
-#define APP_SQUARE_LOST_SPEED_SCALE 0.45f // Slow square-mode lost-line recovery without forcing an abrupt pivot.
-#define APP_SQUARE_LOST_TURN 0.060f // Turn more than normal line mode, but less aggressively than the failed test.
-#define APP_SQUARE_CORNER_ENTER_ERROR 32 // Wait until the center is closer to disappearing before entering a square corner.
-#define APP_SQUARE_CORNER_EXIT_ERROR 5 // Resume normal follow after the black line returns near center.
-#define APP_SQUARE_CORNER_MISSING_LOOPS 3U // Confirm the center is missing for about 60 ms before stopping to turn.
-#define APP_SQUARE_CORNER_BRAKE_LOOPS 5U // Stop for about 100 ms before pivoting into a right-angle turn.
-#define APP_SQUARE_CORNER_MAX_PIVOT_LOOPS 90U // Safety exit after about 1.8 s if center is not reacquired.
-#define APP_SQUARE_CORNER_PIVOT_SPEED 0.16f // In-place turn command while searching for the centered line.
-#define APP_SQUARE_CORNER_DEFAULT_DIRECTION -1 // Square track is counter-clockwise, so prefer left search when center is lost.
+/* 电机映射测试：用明显不同的左右轮比例观察底盘偏航方向。 */
+#define APP_MOTOR_TEST_SLOW_SPEED 0.18f
+#define APP_MOTOR_TEST_FAST_SPEED 0.45f
 
-#if APP_MODE == APP_MODE_SQUARE_FOLLOW
-#define APP_FOLLOW_BASE_SPEED APP_SQUARE_BASE_SPEED
-#define APP_FOLLOW_KP APP_SQUARE_KP
-#define APP_FOLLOW_KD APP_SQUARE_KD
-#define APP_FOLLOW_STEER_SIGN APP_SQUARE_STEER_SIGN
-#define APP_FOLLOW_STEER_LIMIT APP_SQUARE_STEER_LIMIT
-#define APP_FOLLOW_MEDIUM_ERROR APP_SQUARE_MEDIUM_ERROR
-#define APP_FOLLOW_LARGE_ERROR APP_SQUARE_LARGE_ERROR
-#define APP_FOLLOW_LOOP_DELAY APP_SQUARE_LOOP_DELAY
-#define APP_FOLLOW_MEDIUM_SPEED_SCALE APP_SQUARE_MEDIUM_SPEED_SCALE
-#define APP_FOLLOW_LARGE_SPEED_SCALE APP_SQUARE_LARGE_SPEED_SCALE
-#define APP_FOLLOW_MEDIUM_MIN_STEER APP_SQUARE_MEDIUM_MIN_STEER
-#define APP_FOLLOW_LARGE_MIN_STEER APP_SQUARE_LARGE_MIN_STEER
-#define APP_FOLLOW_LOST_RECOVER_MAX APP_SQUARE_LOST_RECOVER_MAX
-#define APP_FOLLOW_LOST_SPEED_SCALE APP_SQUARE_LOST_SPEED_SCALE
-#define APP_FOLLOW_LOST_TURN APP_SQUARE_LOST_TURN
-#elif APP_MODE == APP_MODE_CIRCLE_FOLLOW
-#define APP_FOLLOW_BASE_SPEED APP_CIRCLE_BASE_SPEED
-#define APP_FOLLOW_KP APP_CIRCLE_KP
-#define APP_FOLLOW_KD APP_CIRCLE_KD
-#define APP_FOLLOW_STEER_SIGN APP_CIRCLE_STEER_SIGN
-#define APP_FOLLOW_STEER_LIMIT APP_CIRCLE_STEER_LIMIT
-#define APP_FOLLOW_MEDIUM_ERROR APP_CIRCLE_MEDIUM_ERROR
-#define APP_FOLLOW_LARGE_ERROR APP_CIRCLE_LARGE_ERROR
-#define APP_FOLLOW_LOOP_DELAY APP_CIRCLE_LOOP_DELAY
-#define APP_FOLLOW_MEDIUM_SPEED_SCALE APP_LINE_MEDIUM_SPEED_SCALE
-#define APP_FOLLOW_LARGE_SPEED_SCALE APP_LINE_LARGE_SPEED_SCALE
-#define APP_FOLLOW_MEDIUM_MIN_STEER APP_LINE_MEDIUM_MIN_STEER
-#define APP_FOLLOW_LARGE_MIN_STEER APP_LINE_LARGE_MIN_STEER
-#define APP_FOLLOW_LOST_RECOVER_MAX APP_LINE_LOST_RECOVER_MAX
-#define APP_FOLLOW_LOST_SPEED_SCALE APP_LINE_LOST_SPEED_SCALE
-#define APP_FOLLOW_LOST_TURN APP_LINE_LOST_TURN
-#else
-#define APP_FOLLOW_BASE_SPEED APP_LINE_BASE_SPEED
-#define APP_FOLLOW_KP APP_LINE_KP
-#define APP_FOLLOW_KD APP_LINE_KD
-#define APP_FOLLOW_STEER_SIGN APP_LINE_STEER_SIGN
-#define APP_FOLLOW_STEER_LIMIT APP_LINE_STEER_LIMIT
-#define APP_FOLLOW_MEDIUM_ERROR APP_LINE_MEDIUM_ERROR
-#define APP_FOLLOW_LARGE_ERROR APP_LINE_LARGE_ERROR
-#define APP_FOLLOW_LOOP_DELAY APP_LINE_LOOP_DELAY
-#define APP_FOLLOW_MEDIUM_SPEED_SCALE APP_LINE_MEDIUM_SPEED_SCALE
-#define APP_FOLLOW_LARGE_SPEED_SCALE APP_LINE_LARGE_SPEED_SCALE
-#define APP_FOLLOW_MEDIUM_MIN_STEER APP_LINE_MEDIUM_MIN_STEER
-#define APP_FOLLOW_LARGE_MIN_STEER APP_LINE_LARGE_MIN_STEER
-#define APP_FOLLOW_LOST_RECOVER_MAX APP_LINE_LOST_RECOVER_MAX
-#define APP_FOLLOW_LOST_SPEED_SCALE APP_LINE_LOST_SPEED_SCALE
-#define APP_FOLLOW_LOST_TURN APP_LINE_LOST_TURN
-#endif
-#define APP_ENCODER_WATCH_DELAY (CPUCLK_FREQ / 50U) // Sample encoder counts around 50 Hz for debugger inspection.
-#define APP_SPEED_TEST_LOW_CM_S 20.0f // First and final speed in the automatic step-response test.
-#define APP_SPEED_TEST_HIGH_CM_S 30.0f // Middle speed in the automatic step-response test.
-#define APP_SPEED_TEST_WARMUP_LOOPS 250U // Hold zero PWM for five seconds so the stationary phase is obvious.
-#define APP_SPEED_TEST_HOLD_LOOPS 250U // Hold each 2025-style speed target for five seconds.
-#define APP_SPEED_TEST_LOOP_DELAY (CPUCLK_FREQ / 50U) // Run speed PID around 50 Hz like the line-follow loop.
-/* K230 云台 PID 调参区：两轴参数均使用“分子 / 分母”的定点数形式。 */
-#define APP_K230_FOLLOW_PAN_KP_NUM 8 // Pan Kp：8 / 100 = 0.08 compare/pixel。
+/* CCD Watch 在 RAM 中保留最近 32 帧完整像素，供 CCS Memory Browser 导出。 */
+#define APP_CCD_LOG_FRAME_COUNT 32U
+
+/*
+ * 通用巡线参数。
+ * 误差单位为 CCD 像素索引；base speed 是巡线层比例参考，随后映射为 cm/s 轮速目标。
+ * 误差越大，基础速度越低、最小转向量越大；修正变化率限制用于抑制 CCD 抖动造成的底盘突变。
+ */
+#define APP_LINE_BASE_SPEED 0.49f
+#define APP_LINE_BASE_TARGET_CM_S 30.0f
+#define APP_LINE_KP 0.0020f
+#define APP_LINE_KD 0.0005f
+#define APP_LINE_STEER_LIMIT 0.130f
+#define APP_LINE_MEDIUM_MIN_STEER 0.020f
+#define APP_LINE_LARGE_MIN_STEER 0.090f
+#define APP_LINE_CORRECTION_SLEW_LIMIT 0.035f
+#define APP_LINE_MEDIUM_SPEED_SCALE 0.65f
+#define APP_LINE_LARGE_SPEED_SCALE 0.39f
+#define APP_LINE_DEADBAND_ERROR 5
+#define APP_LINE_MEDIUM_ERROR 6
+#define APP_LINE_LARGE_ERROR 12
+#define APP_LINE_STEER_SIGN 1.0f
+/* CCD 直行模式只做有效性门控，不使用中心误差进行转向。 */
+#define APP_CCD_STRAIGHT_SPEED 0.16f
+
+/* 普通/圆形巡线允许短时沿最后一次有效方向低速搜索，超过窗口后主动停车。 */
+#define APP_LINE_LOST_RECOVER_MAX 8U
+#define APP_LINE_LOST_SPEED_SCALE 0.55f
+#define APP_LINE_LOST_TURN 0.040f
+
+/*
+ * 方形赛道允许更长的丢线搜索，并用独立直角状态机处理黑线中心消失。
+ * 所有 *_LOOPS 均以 20 ms 快速任务周期计数。
+ */
+#define APP_SQUARE_LOST_RECOVER_MAX 14U
+#define APP_SQUARE_LOST_SPEED_SCALE 0.45f
+#define APP_SQUARE_LOST_TURN 0.060f
+#define APP_SQUARE_CORNER_ENTER_ERROR 32
+#define APP_SQUARE_CORNER_EXIT_ERROR 5
+#define APP_SQUARE_CORNER_MISSING_LOOPS 3U
+#define APP_SQUARE_CORNER_BRAKE_LOOPS 5U
+#define APP_SQUARE_CORNER_MAX_PIVOT_LOOPS 90U
+#define APP_SQUARE_CORNER_PIVOT_SPEED 0.16f
+#define APP_SQUARE_CORNER_DEFAULT_DIRECTION (-1)
+/* 速度测试以 20 ms 为一步，循环执行静止、20、30、20 cm/s 四个阶段。 */
+#define APP_SPEED_TEST_LOW_CM_S 20.0f
+#define APP_SPEED_TEST_HIGH_CM_S 30.0f
+#define APP_SPEED_TEST_WARMUP_LOOPS 250U
+#define APP_SPEED_TEST_HOLD_LOOPS 250U
+
+/*
+ * K230 云台增量 PID 参数。
+ * 图像误差来自 640×360 坐标系；两轴分别计算 P/I/D，合成后限制单帧 compare 增量。
+ * Ki 当前保持关闭，但保留积分状态和限幅，便于后续实车调参。
+ */
+#define APP_K230_FOLLOW_PAN_KP_NUM 8
 #define APP_K230_FOLLOW_PAN_KP_DEN 100
-#define APP_K230_FOLLOW_PAN_KI_NUM 0 // Pan Ki 暂时关闭，后续可直接修改分子启用积分。
+#define APP_K230_FOLLOW_PAN_KI_NUM 0
 #define APP_K230_FOLLOW_PAN_KI_DEN 100
-#define APP_K230_FOLLOW_PAN_KD_NUM 4 // Pan Kd：4 / 100，抑制误差快速变化造成的过冲。
+#define APP_K230_FOLLOW_PAN_KD_NUM 4
 #define APP_K230_FOLLOW_PAN_KD_DEN 100
-#define APP_K230_FOLLOW_PAN_INTEGRAL_LIMIT 1000 // Pan 积分累计限制，单位为像素·帧。
-
-#define APP_K230_FOLLOW_TILT_KP_NUM 8 // Tilt Kp：8 / 100 = 0.08 compare/pixel。
+#define APP_K230_FOLLOW_PAN_INTEGRAL_LIMIT 1000
+#define APP_K230_FOLLOW_TILT_KP_NUM 8
 #define APP_K230_FOLLOW_TILT_KP_DEN 100
-#define APP_K230_FOLLOW_TILT_KI_NUM 0 // Tilt Ki 暂时关闭，后续可直接修改分子启用积分。
+#define APP_K230_FOLLOW_TILT_KI_NUM 0
 #define APP_K230_FOLLOW_TILT_KI_DEN 100
-#define APP_K230_FOLLOW_TILT_KD_NUM 4 // Tilt Kd：4 / 100，抑制误差快速变化造成的过冲。
+#define APP_K230_FOLLOW_TILT_KD_NUM 4
 #define APP_K230_FOLLOW_TILT_KD_DEN 100
-#define APP_K230_FOLLOW_TILT_INTEGRAL_LIMIT 1000 // Tilt 积分累计限制，单位为像素·帧。
-
-#define APP_K230_FOLLOW_X_DEADBAND 10 // 水平误差绝对值不超过 10 像素时 Pan 保持不动。
-#define APP_K230_FOLLOW_Y_DEADBAND 8 // 垂直误差绝对值不超过 8 像素时 Tilt 保持不动。
-#define APP_K230_FOLLOW_PAN_MAX_STEP 20 // 每个新目标帧最多改变 20 个 Pan compare，减小单帧角度跳变。
-#define APP_K230_FOLLOW_TILT_MAX_STEP 15 // 每个新目标帧最多改变 15 个 Tilt compare，减小单帧角度跳变。
-#define APP_K230_FOLLOW_PAN_DIRECTION (-1) // 正 error_x 使 Pan compare 减小。
-#define APP_K230_FOLLOW_TILT_DIRECTION 1 // 正 error_y 时减小 Tilt compare，使云台向下追踪并形成负反馈。
-#define APP_K230_FOLLOW_STARTUP_HOLD_MS 2000U // 上电后两秒内保持双轴初始化位置。
+#define APP_K230_FOLLOW_TILT_INTEGRAL_LIMIT 1000
+#define APP_K230_FOLLOW_X_DEADBAND 10
+#define APP_K230_FOLLOW_Y_DEADBAND 8
+#define APP_K230_FOLLOW_PAN_MAX_STEP 20
+#define APP_K230_FOLLOW_TILT_MAX_STEP 15
+#define APP_K230_FOLLOW_PAN_DIRECTION (-1)
+#define APP_K230_FOLLOW_TILT_DIRECTION 1
+#define APP_K230_FOLLOW_STARTUP_HOLD_MS 2000U
 #define APP_K230_FOLLOW_STATE_WAIT_LINK 0U
 #define APP_K230_FOLLOW_STATE_TRACKING 1U
 #define APP_K230_FOLLOW_STATE_HOLD 2U
 #define APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED 3U
 
-volatile uint32_t g_app_debug_mode = 0U; // Watch this value to confirm the running firmware writes the selected APP_MODE.
+/* 运动模式切换前保持 100 ms 主动制动，降低惯性带来的模式交叉影响。 */
+#define APP_MODE_SWITCH_BRAKE_MS 100U
+/* 快速周期用于 CCD、编码器和速度闭环；打印周期控制串口负载；慢速周期用于心跳和 UART 测试。 */
+#define APP_LOOP_FAST_MS 20U
+#define APP_LOOP_PRINT_MS 500U
+#define APP_LOOP_SLOW_MS 1000U
 
-#if APP_MODE == APP_MODE_K230_FOLLOW
+/* 模式切换状态：稳定运行、制动等待、执行退出/进入提交。 */
+#define APP_SWITCH_IDLE 0U
+#define APP_SWITCH_BRAKING 1U
+#define APP_SWITCH_ENTERING 2U
+
+/*
+ * 三种巡线模式共享的参数集合。
+ * medium/large_error 以像素为单位；速度和转向字段为巡线层比例参考；lost_recover_max 为 20 ms 循环次数。
+ */
+typedef struct {
+    float base_speed;             /* 中心附近的基础前进参考。 */
+    float kp;                     /* CCD 中心误差的比例增益。 */
+    float kd;                     /* 相邻帧误差差分的增益。 */
+    float steer_sign;             /* 将 CCD 误差方向映射到底盘左右轮差速方向。 */
+    float steer_limit;            /* 最大转向修正绝对值。 */
+    int16_t medium_error;         /* 开始降速的中等误差阈值。 */
+    int16_t large_error;          /* 进入强恢复的较大误差阈值。 */
+    float medium_speed_scale;     /* 中等误差时的基础速度缩放。 */
+    float large_speed_scale;      /* 大误差时的基础速度缩放。 */
+    float medium_min_steer;       /* 中等误差必须保留的最小转向量。 */
+    float large_min_steer;        /* 大误差必须保留的最小转向量。 */
+    uint16_t lost_recover_max;    /* 丢线后仍尝试搜索的最大循环数。 */
+    float lost_speed_scale;       /* 丢线搜索时的基础速度缩放。 */
+    float lost_turn;              /* 丢线搜索时沿最后有效方向施加的转向量。 */
+} App_FollowProfile;
+
+/*
+ * 一帧可导出的 CCD 调试快照。
+ * valid 为 0 时 target/black edge 可能使用 -1 表示无可靠检测；raw 保存完整 128 像素 ADC 值。
+ */
+typedef struct {
+    uint16_t frame_count;         /* 紧凑帧序号，取全局帧计数低 16 位。 */
+    uint16_t valid;               /* 当前帧是否具有可用目标。 */
+    int16_t target;               /* 黑线中心像素索引。 */
+    int16_t error;                /* target - CCD 中心索引。 */
+    int16_t black_left;
+    int16_t black_right;
+    uint16_t black_width;
+    uint16_t raw_min;
+    uint16_t raw_max;
+    uint16_t threshold;
+    uint16_t contrast;
+    uint16_t raw_min_index;
+    uint16_t raw_max_index;
+    uint16_t raw[BSP_CCD_PIXEL_COUNT];
+} App_CcdLogFrame;
+
+/* 普通巡线的实车参数基线。 */
+static const App_FollowProfile g_line_follow_profile = {
+    APP_LINE_BASE_SPEED, APP_LINE_KP, APP_LINE_KD, APP_LINE_STEER_SIGN,
+    APP_LINE_STEER_LIMIT, APP_LINE_MEDIUM_ERROR, APP_LINE_LARGE_ERROR,
+    APP_LINE_MEDIUM_SPEED_SCALE, APP_LINE_LARGE_SPEED_SCALE,
+    APP_LINE_MEDIUM_MIN_STEER, APP_LINE_LARGE_MIN_STEER,
+    APP_LINE_LOST_RECOVER_MAX, APP_LINE_LOST_SPEED_SCALE, APP_LINE_LOST_TURN
+};
+
+/* 圆形赛道当前复用普通巡线数值，但保留独立 profile 便于后续单独调参。 */
+static const App_FollowProfile g_circle_follow_profile = {
+    APP_LINE_BASE_SPEED, APP_LINE_KP, APP_LINE_KD, APP_LINE_STEER_SIGN,
+    APP_LINE_STEER_LIMIT, APP_LINE_MEDIUM_ERROR, APP_LINE_LARGE_ERROR,
+    APP_LINE_MEDIUM_SPEED_SCALE, APP_LINE_LARGE_SPEED_SCALE,
+    APP_LINE_MEDIUM_MIN_STEER, APP_LINE_LARGE_MIN_STEER,
+    APP_LINE_LOST_RECOVER_MAX, APP_LINE_LOST_SPEED_SCALE, APP_LINE_LOST_TURN
+};
+
+/* 方形赛道增加更长的丢线搜索窗口，并由独立直角状态机优先接管。 */
+static const App_FollowProfile g_square_follow_profile = {
+    APP_LINE_BASE_SPEED, APP_LINE_KP, APP_LINE_KD, APP_LINE_STEER_SIGN,
+    APP_LINE_STEER_LIMIT, APP_LINE_MEDIUM_ERROR, APP_LINE_LARGE_ERROR,
+    APP_LINE_MEDIUM_SPEED_SCALE, APP_LINE_LARGE_SPEED_SCALE,
+    APP_LINE_MEDIUM_MIN_STEER, APP_LINE_LARGE_MIN_STEER,
+    APP_SQUARE_LOST_RECOVER_MAX, APP_SQUARE_LOST_SPEED_SCALE,
+    APP_SQUARE_LOST_TURN
+};
+
+/*
+ * 模式管理状态，均可在 CCS Watch 中观察。
+ * current 是已生效模式，requested 是待进入模式，debug_mode 镜像最终提交结果；switch_state 表示切换阶段。
+ */
+volatile uint32_t g_app_debug_mode = APP_MODE_STOPPED;
+volatile uint8_t g_app_current_mode = APP_MODE_STOPPED;
+volatile uint8_t g_app_requested_mode = APP_MODE_STOPPED;
+volatile uint8_t g_app_switch_state = APP_SWITCH_IDLE;
+volatile uint32_t g_app_mode_switch_count;
+volatile uint32_t g_app_mode_reject_count;
+
+/* 切换内部状态：制动起始时间、应答中的原始请求，以及按需初始化标志。 */
+static uint32_t g_app_switch_deadline_ms;
+static uint8_t g_app_switch_request;
+static uint8_t g_ccd_initialized;
+static uint8_t g_encoder_initialized;
+static uint8_t g_speed_pid_initialized;
+static uint32_t g_mode_last_task_ms;
+static uint8_t g_motor_test_phase;
+static uint32_t g_motor_test_phase_start_ms;
+static uint32_t g_uart_test_count;
+
+/*
+ * K230 云台跟随诊断量。
+ * control_error 是死区过滤后的图像像素误差；delta/compare 是本帧增量和当前定时器比较值。
+ * 状态依次为等待链路、跟踪、无目标保持、链路超时后关闭 PWM。
+ */
 static uint32_t g_k230_follow_seen_timeout_count;
 static uint32_t g_k230_follow_start_ms;
-volatile int16_t g_k230_control_error_x = 0; // Watch the horizontal error after validity and deadband filtering.
-volatile int16_t g_k230_control_error_y = 0; // Watch the vertical error after validity and deadband filtering.
-volatile int16_t g_k230_pan_delta = 0; // Watch the actual Pan compare change applied for the latest valid target frame.
-volatile int16_t g_k230_tilt_delta = 0; // Watch the actual Tilt compare change applied for the latest valid target frame.
-volatile int32_t g_k230_pan_p_term = 0; // Watch Pan PID proportional contribution before direction correction.
-volatile int32_t g_k230_pan_i_term = 0; // Watch Pan PID integral contribution before direction correction.
-volatile int32_t g_k230_pan_d_term = 0; // Watch Pan PID derivative contribution before direction correction.
-volatile int32_t g_k230_tilt_p_term = 0; // Watch Tilt PID proportional contribution before direction correction.
-volatile int32_t g_k230_tilt_i_term = 0; // Watch Tilt PID integral contribution before direction correction.
-volatile int32_t g_k230_tilt_d_term = 0; // Watch Tilt PID derivative contribution before direction correction.
-volatile int32_t g_k230_pan_integral = 0; // Watch the limited Pan integral accumulator in pixel-frames.
-volatile int32_t g_k230_tilt_integral = 0; // Watch the limited Tilt integral accumulator in pixel-frames.
-volatile int16_t g_k230_pan_previous_error = 0; // Previous filtered Pan error used by the derivative term.
-volatile int16_t g_k230_tilt_previous_error = 0; // Previous filtered Tilt error used by the derivative term.
+volatile int16_t g_k230_control_error_x;
+volatile int16_t g_k230_control_error_y;
+volatile int16_t g_k230_pan_delta;
+volatile int16_t g_k230_tilt_delta;
+volatile int32_t g_k230_pan_p_term;
+volatile int32_t g_k230_pan_i_term;
+volatile int32_t g_k230_pan_d_term;
+volatile int32_t g_k230_tilt_p_term;
+volatile int32_t g_k230_tilt_i_term;
+volatile int32_t g_k230_tilt_d_term;
+volatile int32_t g_k230_pan_integral;
+volatile int32_t g_k230_tilt_integral;
+volatile int16_t g_k230_pan_previous_error;
+volatile int16_t g_k230_tilt_previous_error;
 static uint8_t g_k230_pan_previous_error_valid;
 static uint8_t g_k230_tilt_previous_error_valid;
-volatile uint16_t g_k230_pan_compare = BSP_PTZ_PAN_CENTER; // Watch the current Pan command sent to the BSP.
-volatile uint16_t g_k230_tilt_compare = BSP_PTZ_TILT_CENTER; // Watch the current Tilt command sent to the BSP.
-volatile uint8_t g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK; // 0 wait, 1 tracking, 2 hold, 3 timeout-disabled.
-volatile uint32_t g_k230_follow_update_count = 0U; // Count valid target frames consumed by the controller.
-#endif
+volatile uint16_t g_k230_pan_compare = BSP_PTZ_PAN_CENTER;
+volatile uint16_t g_k230_tilt_compare = BSP_PTZ_TILT_CENTER;
+volatile uint8_t g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK;
+volatile uint32_t g_k230_follow_update_count;
 
-#if (APP_MODE == APP_MODE_ENCODER_WATCH) || (APP_MODE == APP_MODE_SPEED_TEST) || \
-    (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || \
-    (APP_MODE == APP_MODE_SQUARE_FOLLOW)
-volatile int32_t g_encoder_left_count = 0; // Watch this value for logical-left accumulated encoder ticks.
-volatile int32_t g_encoder_right_count = 0; // Watch this value for logical-right accumulated encoder ticks.
-volatile int16_t g_encoder_left_speed = 0; // Watch this value for logical-left ticks in the latest sample window.
-volatile int16_t g_encoder_right_speed = 0; // Watch this value for logical-right ticks in the latest sample window.
-volatile float g_speed_left_target = 0.0f; // Watch the logical-left ramped speed target in cm/s.
-volatile float g_speed_right_target = 0.0f; // Watch the logical-right ramped speed target in cm/s.
-volatile float g_speed_left_measured = 0.0f; // Watch filtered logical-left measured speed in cm/s.
-volatile float g_speed_right_measured = 0.0f; // Watch filtered logical-right measured speed in cm/s.
-volatile float g_speed_left_cmd = 0.0f; // Watch this value for logical-left PWM ratio generated by speed PI.
-volatile float g_speed_right_cmd = 0.0f; // Watch this value for logical-right PWM ratio generated by speed PI.
-volatile float g_speed_left_p = 0.0f; // Watch logical-left proportional PWM contribution.
-volatile float g_speed_right_p = 0.0f; // Watch logical-right proportional PWM contribution.
-volatile float g_speed_left_i = 0.0f; // Watch logical-left integral PWM contribution.
-volatile float g_speed_right_i = 0.0f; // Watch logical-right integral PWM contribution.
-volatile uint32_t g_speed_faults = 0U; // Bit 0 left encoder loss, bit 1 right encoder loss.
-#endif
+/*
+ * 编码器和速度闭环 Watch 镜像。
+ * count 是累计软件计数，speed 是最近 20 ms 窗口的有符号增量；target/measured 单位为 cm/s。
+ * command 是最终 PWM 比例，fault bit0/bit1 分别表示左/右编码器在受驱动时持续无反馈。
+ */
+volatile int32_t g_encoder_left_count;
+volatile int32_t g_encoder_right_count;
+volatile int16_t g_encoder_left_speed;
+volatile int16_t g_encoder_right_speed;
+volatile float g_speed_left_target;
+volatile float g_speed_right_target;
+volatile float g_speed_left_measured;
+volatile float g_speed_right_measured;
+volatile float g_speed_left_cmd;
+volatile float g_speed_right_cmd;
+volatile float g_speed_left_p;
+volatile float g_speed_right_p;
+volatile float g_speed_left_i;
+volatile float g_speed_right_i;
+volatile uint32_t g_speed_faults;
+/* 速度阶跃阶段：0 静止预热、1 目标 20、2 目标 30、3 返回 20 cm/s；loop 为 20 ms 步序号。 */
+volatile uint32_t g_speed_test_phase;
+volatile uint32_t g_speed_test_loop;
 
-#if APP_MODE == APP_MODE_SPEED_TEST
-volatile uint32_t g_speed_test_phase = 0U; // 0 warmup, 1 at 20 cm/s, 2 at 30 cm/s, 3 returned to 20 cm/s.
-volatile uint32_t g_speed_test_loop = 0U; // Current 20 ms loop index for locating target transitions in Watch.
-#endif
+/*
+ * CCD Watch 当前帧镜像和 32 帧环形日志。
+ * raw/filtered 诊断值由 CCD Watch 模式更新；log_write_index 指向下一写入槽，log_filled 表示有效槽数量。
+ */
+volatile uint32_t g_debug_ccd_frame_count;
+volatile uint8_t g_debug_ccd_valid;
+volatile int16_t g_debug_ccd_target = -1;
+volatile int16_t g_debug_ccd_error;
+volatile int16_t g_debug_ccd_black_left = -1;
+volatile int16_t g_debug_ccd_black_right = -1;
+volatile uint16_t g_debug_ccd_black_width;
+volatile uint16_t g_debug_ccd_raw_min;
+volatile uint16_t g_debug_ccd_raw_max;
+volatile uint16_t g_debug_ccd_raw_min_index;
+volatile uint16_t g_debug_ccd_raw_max_index;
+volatile uint16_t g_debug_ccd_contrast;
+volatile uint16_t g_debug_ccd_threshold;
+volatile int16_t g_debug_ccd_dx_max;
+volatile int16_t g_debug_ccd_dx_min;
+volatile uint16_t g_debug_ccd_dx_max_index;
+volatile uint16_t g_debug_ccd_dx_min_index;
+volatile uint16_t g_debug_ccd_raw[BSP_CCD_PIXEL_COUNT];
+volatile uint16_t g_debug_ccd_log_write_index;
+volatile uint16_t g_debug_ccd_log_filled;
+volatile App_CcdLogFrame g_debug_ccd_log[APP_CCD_LOG_FRAME_COUNT];
 
-#if APP_MODE == APP_MODE_CCD_WATCH
-typedef struct {
-    uint16_t frame_count; // CSV column: low 16 bits of the frame counter.
-    uint16_t valid; // CSV column: 1 when a black line is detected.
-    int16_t target; // CSV column: detected black-line center index.
-    int16_t error; // CSV column: target minus CCD center index.
-    int16_t black_left; // CSV column: detected dark-region left edge.
-    int16_t black_right; // CSV column: detected dark-region right edge.
-    uint16_t black_width; // CSV column: detected dark-region width.
-    uint16_t raw_min; // CSV column: darkest filtered CCD sample.
-    uint16_t raw_max; // CSV column: brightest filtered CCD sample.
-    uint16_t threshold; // CSV column: adaptive black-line threshold.
-    uint16_t contrast; // CSV column: raw_max minus raw_min.
-    uint16_t raw_min_index; // CSV column: index of the darkest filtered pixel.
-    uint16_t raw_max_index; // CSV column: index of the brightest filtered pixel.
-    uint16_t raw[BSP_CCD_PIXEL_COUNT]; // CSV columns: raw_0 through raw_127.
-} App_CcdLogFrame;
-#endif
+/*
+ * 巡线实时状态。
+ * 正 error 表示黑线位于 CCD 中心右侧；left/right_cmd 是巡线层参考，并非最终硬件 PWM。
+ * recover_direction 为 -1 左搜、+1 右搜；last_error/last_correction 保存算法内部历史量。
+ */
+volatile uint8_t g_line_valid;
+volatile int16_t g_line_target = -1;
+volatile int16_t g_line_error;
+volatile int16_t g_line_error_delta;
+volatile int16_t g_line_dx_max;
+volatile int16_t g_line_dx_min;
+volatile uint16_t g_line_dx_max_index;
+volatile uint16_t g_line_dx_min_index;
+volatile uint16_t g_line_raw_min;
+volatile uint16_t g_line_raw_max;
+volatile uint16_t g_line_raw_min_index;
+volatile uint16_t g_line_raw_max_index;
+volatile uint16_t g_line_contrast;
+volatile uint16_t g_line_lost_count;
+volatile float g_line_correction;
+volatile float g_line_left_cmd;
+volatile float g_line_right_cmd;
+volatile int8_t g_line_recover_direction;
+static int16_t g_line_last_error;
+static float g_line_last_correction;
 
-#if APP_MODE == APP_MODE_CCD_WATCH
-volatile uint32_t g_debug_ccd_frame_count = 0U; // Watch this value to confirm CCD frames keep updating.
-volatile uint8_t g_debug_ccd_valid = 0U; // Watch this value; 1 means the current frame has a detected black line.
-volatile int16_t g_debug_ccd_target = -1; // Watch this value for the detected black-line center index.
-volatile int16_t g_debug_ccd_error = 0; // Watch this value for signed center error; positive means line is right.
-volatile int16_t g_debug_ccd_black_left = -1; // Watch this value for the left edge of the detected dark region.
-volatile int16_t g_debug_ccd_black_right = -1; // Watch this value for the right edge of the detected dark region.
-volatile uint16_t g_debug_ccd_black_width = 0U; // Watch this value for the detected dark-region width.
-volatile uint16_t g_debug_ccd_raw_min = 0U; // Watch this value for the darkest filtered CCD sample.
-volatile uint16_t g_debug_ccd_raw_max = 0U; // Watch this value for the brightest filtered CCD sample.
-volatile uint16_t g_debug_ccd_raw_min_index = 0U; // Watch this value to see where the darkest pixel is.
-volatile uint16_t g_debug_ccd_raw_max_index = 0U; // Watch this value to see where the brightest pixel is.
-volatile uint16_t g_debug_ccd_contrast = 0U; // Watch this value; low contrast means CCD/lighting is not reliable.
-volatile uint16_t g_debug_ccd_threshold = 0U; // Watch this value for the adaptive black-line threshold.
-volatile int16_t g_debug_ccd_dx_max = 0; // Watch this value for the strongest 2025-style positive CCD edge.
-volatile int16_t g_debug_ccd_dx_min = 0; // Watch this value for the strongest 2025-style negative CCD edge.
-volatile uint16_t g_debug_ccd_dx_max_index = 0U; // Watch this value for the positive-edge index used by the 2025 CCD algorithm.
-volatile uint16_t g_debug_ccd_dx_min_index = 0U; // Watch this value for the negative-edge index used by the 2025 CCD algorithm.
-volatile uint16_t g_debug_ccd_raw[BSP_CCD_PIXEL_COUNT]; // Watch this array to inspect all 128 raw CCD pixels.
-volatile uint16_t g_debug_ccd_log_write_index = 0U; // Watch this value to know which RAM log slot will be written next.
-volatile uint16_t g_debug_ccd_log_filled = 0U; // Watch this value; 32 means the RAM log has one full buffer.
-volatile App_CcdLogFrame g_debug_ccd_log[APP_CCD_LOG_FRAME_COUNT]; // Export this RAM block through CCS Memory Browser for CSV conversion.
-#endif
+/*
+ * 方形直角状态：0 正常巡线、1 主动制动等待、2 原地转向找线。
+ * count 是当前状态内的 20 ms 循环数；direction 为 -1 左转、+1 右转。
+ * seen_center_line 防止启动时误判，center_missing_count 用连续帧确认中心线确实消失。
+ */
+volatile uint8_t g_square_corner_state;
+volatile uint32_t g_square_corner_count;
+volatile int8_t g_square_corner_direction;
+volatile uint32_t g_square_corner_entry_count;
+volatile uint8_t g_square_seen_center_line;
+volatile uint8_t g_square_center_missing_count;
 
-#if (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CCD_STRAIGHT) || \
-    (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_SQUARE_FOLLOW)
-volatile uint8_t g_line_valid = 0U; // Watch this value; 1 means line-follow is actively driving.
-volatile int16_t g_line_target = -1; // Watch this value for the latest CCD target used by steering.
-volatile int16_t g_line_error = 0; // Watch this value for the latest centered CCD error.
-volatile int16_t g_line_error_delta = 0; // Watch this value for the error change used by the derivative term.
-volatile int16_t g_line_dx_max = 0; // Watch this value for the strongest 2025-style positive CCD edge.
-volatile int16_t g_line_dx_min = 0; // Watch this value for the strongest 2025-style negative CCD edge.
-volatile uint16_t g_line_dx_max_index = 0U; // Watch this value for the positive-edge index used by the 2025 CCD algorithm.
-volatile uint16_t g_line_dx_min_index = 0U; // Watch this value for the negative-edge index used by the 2025 CCD algorithm.
-volatile uint16_t g_line_raw_min = 0U; // Watch the darkest filtered CCD sample in normal line-follow mode.
-volatile uint16_t g_line_raw_max = 0U; // Watch the brightest filtered CCD sample in normal line-follow mode.
-volatile uint16_t g_line_raw_min_index = 0U; // Watch whether the darkest CCD sample is stuck at a sensor edge.
-volatile uint16_t g_line_raw_max_index = 0U; // Watch whether the brightest CCD sample is stuck at a sensor edge.
-volatile uint16_t g_line_contrast = 0U; // Watch the current CCD brightness span while the motors are running.
-volatile uint16_t g_line_lost_count = 0U; // Watch this value for consecutive target-missing frames.
-volatile float g_line_correction = 0.0f; // Watch this value for the actual steering correction applied to the wheels.
-volatile float g_line_left_cmd = 0.0f; // Watch this value for the commanded logical left motor ratio.
-volatile float g_line_right_cmd = 0.0f; // Watch this value for the commanded logical right motor ratio.
-volatile int8_t g_line_recover_direction = 0; // Watch this value; -1 searches left, +1 searches right after target loss.
-static int16_t g_line_last_error = 0; // Keep the previous fixed-center error for the derivative steering term.
-static float g_line_last_correction = 0.0f; // Smooth steering output so CCD jitter does not kick the chassis.
-#endif
+/*
+ * 判断周期是否到期。使用 uint32_t 无符号差值可自然跨越毫秒计数回绕；到期后同步更新基准时间。
+ */
+static uint8_t App_TimeElapsed(uint32_t *last_ms, uint32_t period_ms)
+{
+    uint32_t now_ms = Bsp_Time_GetMilliseconds();
 
-#if APP_MODE == APP_MODE_SQUARE_FOLLOW
-volatile uint8_t g_square_corner_state = 0U; // 0 normal, 1 braking, 2 pivoting until the line returns to center.
-volatile uint32_t g_square_corner_count = 0U; // Watch how many 20 ms loops have elapsed in the current corner state.
-volatile int8_t g_square_corner_direction = 0; // -1 pivots left, +1 pivots right.
-volatile uint32_t g_square_corner_entry_count = 0U; // Count detected square-corner entries for tuning.
-volatile uint8_t g_square_seen_center_line = 0U; // 1 after a real centered black region has been detected.
-volatile uint8_t g_square_center_missing_count = 0U; // Debounce early corner entry when the line only briefly shifts.
-#endif
+    if ((uint32_t) (now_ms - *last_ms) < period_ms) {
+        return 0U;
+    }
 
-#if APP_MODE == APP_MODE_UART_TEST
+    *last_ms = now_ms;
+    return 1U;
+}
+
+/* 返回该模式是否可能驱动底盘；结果决定切换前是否需要 100 ms 主动制动。 */
+static uint8_t App_ModeUsesMotor(uint8_t mode)
+{
+    return ((mode == APP_MODE_MOTOR_PWM) ||
+            (mode == APP_MODE_LINE_FOLLOW) ||
+            (mode == APP_MODE_CCD_STRAIGHT) ||
+            (mode == APP_MODE_SPEED_TEST) ||
+            (mode == APP_MODE_CIRCLE_FOLLOW) ||
+            (mode == APP_MODE_SQUARE_FOLLOW)) ? 1U : 0U;
+}
+
+/*
+ * CCD、编码器和速度闭环采用首次使用时初始化，避免无关调试模式提前启动外设。
+ * 每次重新进入模式只复位算法状态，不重复配置底层硬件。
+ */
+static void App_EnsureCcd(void)
+{
+    if (g_ccd_initialized == 0U) {
+        Bsp_Ccd_Init();
+        g_ccd_initialized = 1U;
+    }
+}
+
+static void App_EnsureEncoder(void)
+{
+    if (g_encoder_initialized == 0U) {
+        Bsp_Motor_EncoderInit();
+        g_encoder_initialized = 1U;
+    }
+}
+
+static void App_EnsureSpeedPid(void)
+{
+    App_EnsureEncoder();
+    if (g_speed_pid_initialized == 0U) {
+        Bsp_Motor_SpeedPidInit();
+        g_speed_pid_initialized = 1U;
+    }
+}
+
+/* 不依赖 printf，将无符号整数转换为十进制字符并直接发送到 K230 UART。 */
 static void App_SendUint32(uint32_t value)
 {
     char buf[10];
     uint8_t idx = 0U;
 
     do {
-        buf[idx] = (char) ('0' + (value % 10U));
+        buf[idx++] = (char) ('0' + (value % 10U));
         value /= 10U;
-        idx++;
     } while (value != 0U);
 
     while (idx != 0U) {
-        idx--;
-        Bsp_Uart_K230_SendByte((uint8_t) buf[idx]); // Send decimal digits without pulling in stdio.
+        Bsp_Uart_K230_SendByte((uint8_t) buf[--idx]);
     }
 }
-#endif
 
-#if (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || \
-    (APP_MODE == APP_MODE_SQUARE_FOLLOW)
+/* 将转向修正限制在对称范围内，避免算法指令超过实车安全调试区间。 */
 static float App_LimitFloat(float value, float limit)
 {
     if (value > limit) {
-        return limit; // Clamp positive correction to keep first map runs gentle.
+        return limit;
     }
     if (value < -limit) {
-        return -limit; // Clamp negative correction to keep first map runs gentle.
+        return -limit;
     }
     return value;
 }
 
+/* 限制相邻控制周期的修正变化量，降低 CCD 跳变对底盘的瞬时冲击。 */
 static float App_LimitFloatDelta(float value, float last_value, float max_delta)
 {
     float delta = value - last_value;
@@ -327,13 +421,9 @@ static float App_LimitFloatDelta(float value, float last_value, float max_delta)
     return value;
 }
 
-static void App_LineApplySpeedPid(float left_reference, float right_reference)
+/* 将底层速度闭环状态统一镜像到全局量，便于 CCS Watch 同时观察左右轮。 */
+static void App_UpdateSpeedWatch(void)
 {
-    const float reference_to_cm_s = APP_LINE_BASE_TARGET_CM_S / APP_LINE_BASE_SPEED;
-
-    Bsp_Motor_SetSpeedTargets(left_reference * reference_to_cm_s,
-                              right_reference * reference_to_cm_s); // Preserve the frozen CCD left/right ratio in cm/s.
-    Bsp_Motor_SpeedPidUpdate(); // Close each wheel independently around the CCD-derived speed targets.
     g_encoder_left_count = Bsp_Motor_GetLeftEncoderCount();
     g_encoder_right_count = Bsp_Motor_GetRightEncoderCount();
     g_encoder_left_speed = Bsp_Motor_GetLeftEncoderSpeed();
@@ -350,9 +440,52 @@ static void App_LineApplySpeedPid(float left_reference, float right_reference)
     g_speed_right_i = Bsp_Motor_GetRightSpeedITerm();
     g_speed_faults = Bsp_Motor_GetSpeedFaults();
 }
-#endif
 
-#if APP_MODE == APP_MODE_CCD_WATCH
+/*
+ * 将巡线层左右比例参考按已验证的直线基准映射为 cm/s，再运行两个独立轮速控制器。
+ * 因此 Watch 中的巡线命令、轮速目标和最终 PWM 输出属于三个不同层次。
+ */
+static void App_LineApplySpeedPid(float left_reference, float right_reference)
+{
+    const float reference_to_cm_s = APP_LINE_BASE_TARGET_CM_S / APP_LINE_BASE_SPEED;
+
+    Bsp_Motor_SetSpeedTargets(left_reference * reference_to_cm_s,
+                              right_reference * reference_to_cm_s);
+    Bsp_Motor_SpeedPidUpdate();
+    App_UpdateSpeedWatch();
+}
+
+/* 清除巡线输出、丢线计数和 PD 历史，保证每次进入巡线模式都从确定状态开始。 */
+static void App_ResetLineState(void)
+{
+    g_line_valid = 0U;
+    g_line_target = -1;
+    g_line_error = 0;
+    g_line_error_delta = 0;
+    g_line_lost_count = 0U;
+    g_line_correction = 0.0f;
+    g_line_left_cmd = 0.0f;
+    g_line_right_cmd = 0.0f;
+    g_line_recover_direction = 0;
+    g_line_last_error = 0;
+    g_line_last_correction = 0.0f;
+}
+
+/* 清除方形赛道角点阶段、计时和连续丢线确认，避免继承上一次直角过程。 */
+static void App_ResetSquareState(void)
+{
+    g_square_corner_state = 0U;
+    g_square_corner_count = 0U;
+    g_square_corner_direction = 0;
+    g_square_corner_entry_count = 0U;
+    g_square_seen_center_line = 0U;
+    g_square_center_missing_count = 0U;
+}
+
+/*
+ * 镜像当前 CCD 检测结果，并把完整 128 像素帧写入固定 32 槽环形日志。
+ * 日志覆盖最旧帧，不进行动态内存分配，适合通过 CCS Memory Browser 导出。
+ */
 static void App_UpdateCcdWatchData(void)
 {
     uint16_t i;
@@ -360,57 +493,51 @@ static void App_UpdateCcdWatchData(void)
     const uint16_t *raw = Bsp_Ccd_GetRawFrame();
 
     for (i = 0U; i < BSP_CCD_PIXEL_COUNT; i++) {
-        g_debug_ccd_raw[i] = raw[i]; // Mirror raw pixels into volatile memory for CCS Watch/Expressions.
+        g_debug_ccd_raw[i] = raw[i];
     }
 
-    g_debug_ccd_target = Bsp_Ccd_GetTargetIndex(); // Mirror target so the debugger can read it without UART.
-    g_debug_ccd_error = Bsp_Ccd_GetLineError(); // Mirror signed error so the debugger can read it without UART.
-    g_debug_ccd_valid = Bsp_Ccd_IsLineValid(); // Mirror detection validity so -1 target is easy to interpret.
-    g_debug_ccd_black_left = Bsp_Ccd_GetBlackLeft(); // Mirror detected dark-region left edge for tuning.
-    g_debug_ccd_black_right = Bsp_Ccd_GetBlackRight(); // Mirror detected dark-region right edge for tuning.
-    g_debug_ccd_black_width = Bsp_Ccd_GetBlackWidth(); // Mirror detected dark-region width for tuning.
-    g_debug_ccd_raw_min = Bsp_Ccd_GetRawMin(); // Mirror darkest sample for contrast checks.
-    g_debug_ccd_raw_max = Bsp_Ccd_GetRawMax(); // Mirror brightest sample for contrast checks.
-    g_debug_ccd_raw_min_index = Bsp_Ccd_GetRawMinIndex(); // Mirror darkest index to catch edge artifacts.
-    g_debug_ccd_raw_max_index = Bsp_Ccd_GetRawMaxIndex(); // Mirror brightest index to catch edge artifacts.
-    g_debug_ccd_contrast = Bsp_Ccd_GetContrast(); // Mirror contrast so lighting can be judged in Watch.
-    g_debug_ccd_threshold = Bsp_Ccd_GetThreshold(); // Mirror adaptive threshold for contrast checks.
-    g_debug_ccd_dx_max = Bsp_Ccd_GetDxMax(); // Mirror strongest positive edge for 2025-style target debugging.
-    g_debug_ccd_dx_min = Bsp_Ccd_GetDxMin(); // Mirror strongest negative edge for 2025-style target debugging.
-    g_debug_ccd_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Mirror positive-edge index for 2025-style target debugging.
-    g_debug_ccd_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Mirror negative-edge index for 2025-style target debugging.
-    g_debug_ccd_frame_count++; // Increment after a complete mirrored frame is ready.
+    g_debug_ccd_target = Bsp_Ccd_GetTargetIndex();
+    g_debug_ccd_error = Bsp_Ccd_GetLineError();
+    g_debug_ccd_valid = Bsp_Ccd_IsLineValid();
+    g_debug_ccd_black_left = Bsp_Ccd_GetBlackLeft();
+    g_debug_ccd_black_right = Bsp_Ccd_GetBlackRight();
+    g_debug_ccd_black_width = Bsp_Ccd_GetBlackWidth();
+    g_debug_ccd_raw_min = Bsp_Ccd_GetRawMin();
+    g_debug_ccd_raw_max = Bsp_Ccd_GetRawMax();
+    g_debug_ccd_raw_min_index = Bsp_Ccd_GetRawMinIndex();
+    g_debug_ccd_raw_max_index = Bsp_Ccd_GetRawMaxIndex();
+    g_debug_ccd_contrast = Bsp_Ccd_GetContrast();
+    g_debug_ccd_threshold = Bsp_Ccd_GetThreshold();
+    g_debug_ccd_dx_max = Bsp_Ccd_GetDxMax();
+    g_debug_ccd_dx_min = Bsp_Ccd_GetDxMin();
+    g_debug_ccd_dx_max_index = Bsp_Ccd_GetDxMaxIndex();
+    g_debug_ccd_dx_min_index = Bsp_Ccd_GetDxMinIndex();
+    g_debug_ccd_frame_count++;
 
     log_index = g_debug_ccd_log_write_index;
-    g_debug_ccd_log[log_index].frame_count = (uint16_t) g_debug_ccd_frame_count; // Store compact frame id for CSV export.
-    g_debug_ccd_log[log_index].valid = g_debug_ccd_valid; // Store current valid flag for CSV export.
-    g_debug_ccd_log[log_index].target = g_debug_ccd_target; // Store current target for CSV export.
-    g_debug_ccd_log[log_index].error = g_debug_ccd_error; // Store current error for CSV export.
-    g_debug_ccd_log[log_index].black_left = g_debug_ccd_black_left; // Store detected left edge for CSV export.
-    g_debug_ccd_log[log_index].black_right = g_debug_ccd_black_right; // Store detected right edge for CSV export.
-    g_debug_ccd_log[log_index].black_width = g_debug_ccd_black_width; // Store detected width for CSV export.
-    g_debug_ccd_log[log_index].raw_min = g_debug_ccd_raw_min; // Store darkest value for CSV export.
-    g_debug_ccd_log[log_index].raw_max = g_debug_ccd_raw_max; // Store brightest value for CSV export.
-    g_debug_ccd_log[log_index].threshold = g_debug_ccd_threshold; // Store threshold for CSV export.
-    g_debug_ccd_log[log_index].contrast = g_debug_ccd_contrast; // Store contrast for CSV export.
-    g_debug_ccd_log[log_index].raw_min_index = g_debug_ccd_raw_min_index; // Store darkest index for CSV export.
-    g_debug_ccd_log[log_index].raw_max_index = g_debug_ccd_raw_max_index; // Store brightest index for CSV export.
+    g_debug_ccd_log[log_index].frame_count = (uint16_t) g_debug_ccd_frame_count;
+    g_debug_ccd_log[log_index].valid = g_debug_ccd_valid;
+    g_debug_ccd_log[log_index].target = g_debug_ccd_target;
+    g_debug_ccd_log[log_index].error = g_debug_ccd_error;
+    g_debug_ccd_log[log_index].black_left = g_debug_ccd_black_left;
+    g_debug_ccd_log[log_index].black_right = g_debug_ccd_black_right;
+    g_debug_ccd_log[log_index].black_width = g_debug_ccd_black_width;
+    g_debug_ccd_log[log_index].raw_min = g_debug_ccd_raw_min;
+    g_debug_ccd_log[log_index].raw_max = g_debug_ccd_raw_max;
+    g_debug_ccd_log[log_index].threshold = g_debug_ccd_threshold;
+    g_debug_ccd_log[log_index].contrast = g_debug_ccd_contrast;
+    g_debug_ccd_log[log_index].raw_min_index = g_debug_ccd_raw_min_index;
+    g_debug_ccd_log[log_index].raw_max_index = g_debug_ccd_raw_max_index;
     for (i = 0U; i < BSP_CCD_PIXEL_COUNT; i++) {
-        g_debug_ccd_log[log_index].raw[i] = raw[i]; // Store one complete raw CCD frame for CSV export.
+        g_debug_ccd_log[log_index].raw[i] = raw[i];
     }
 
-    log_index++;
-    if (log_index >= APP_CCD_LOG_FRAME_COUNT) {
-        log_index = 0U; // Wrap the RAM log so the newest 32 frames are always available.
-    }
-    g_debug_ccd_log_write_index = log_index;
+    g_debug_ccd_log_write_index = (uint16_t) ((log_index + 1U) % APP_CCD_LOG_FRAME_COUNT);
     if (g_debug_ccd_log_filled < APP_CCD_LOG_FRAME_COUNT) {
-        g_debug_ccd_log_filled++; // Count how many log slots have valid data after startup.
+        g_debug_ccd_log_filled++;
     }
 }
-#endif
 
-#if APP_MODE == APP_MODE_K230_FOLLOW
 static int32_t App_K230Follow_LimitInt32(int32_t value, int32_t minimum, int32_t maximum)
 {
     if (value < minimum) {
@@ -424,12 +551,10 @@ static int32_t App_K230Follow_LimitInt32(int32_t value, int32_t minimum, int32_t
 
 static int16_t App_K230Follow_FilterError(int16_t error, int16_t deadband)
 {
-    if ((error >= -deadband) && (error <= deadband)) {
-        return 0;
-    }
-    return error;
+    return ((error >= -deadband) && (error <= deadband)) ? 0 : error;
 }
 
+/* 定点比例运算采用四舍五入，并保留输入符号，避免云台 PID 引入浮点计算。 */
 static int32_t App_K230Follow_ScaleRound(
     int32_t value,
     int16_t numerator,
@@ -443,12 +568,12 @@ static int32_t App_K230Follow_ScaleRound(
     }
 
     absolute_value = (value < 0) ? -value : value;
-    scaled_value =
-        ((absolute_value * numerator) + (denominator / 2)) /
-        denominator;
+    scaled_value = ((absolute_value * numerator) + (denominator / 2)) /
+                   denominator;
     return (value < 0) ? -scaled_value : scaled_value;
 }
 
+/* 清除单轴 PID 历史，防止死区、超时或模式重入后继承旧积分和微分状态。 */
 static void App_K230Follow_ResetPidAxis(
     volatile int32_t *integral,
     volatile int16_t *previous_error,
@@ -483,6 +608,7 @@ static void App_K230Follow_ResetPidState(void)
         &g_k230_tilt_d_term);
 }
 
+/* 计算单轴增量 PID 输出，并在累加到舵机位置前限制本帧最大 compare 变化。 */
 static int16_t App_K230Follow_CalculatePidDelta(
     int16_t error,
     int8_t direction,
@@ -504,23 +630,15 @@ static int16_t App_K230Follow_CalculatePidDelta(
     int32_t derivative_error = 0;
     int32_t delta;
 
-    /* 进入死区后清除该轴历史状态，避免积分残留和下一帧微分突变。 */
     if (error == 0) {
         App_K230Follow_ResetPidAxis(
-            integral,
-            previous_error,
-            previous_error_valid,
-            p_term,
-            i_term,
-            d_term);
+            integral, previous_error, previous_error_valid,
+            p_term, i_term, d_term);
         return 0;
     }
 
     *integral = App_K230Follow_LimitInt32(
-        *integral + error,
-        -integral_limit,
-        integral_limit);
-
+        *integral + error, -integral_limit, integral_limit);
     if (*previous_error_valid != 0U) {
         derivative_error = (int32_t) error - *previous_error;
     }
@@ -529,19 +647,17 @@ static int16_t App_K230Follow_CalculatePidDelta(
 
     *p_term = App_K230Follow_ScaleRound(error, kp_num, kp_den);
     *i_term = App_K230Follow_ScaleRound(*integral, ki_num, ki_den);
-    *d_term = App_K230Follow_ScaleRound(
-        derivative_error,
-        kd_num,
-        kd_den);
+    *d_term = App_K230Follow_ScaleRound(derivative_error, kd_num, kd_den);
 
     delta = (*p_term + *i_term + *d_term) * direction;
-    delta = App_K230Follow_LimitInt32(
-        delta,
-        -max_step,
-        max_step); // PID 合成后先限制单帧变化，再累加到当前舵机位置。
+    delta = App_K230Follow_LimitInt32(delta, -max_step, max_step);
     return (int16_t) delta;
 }
 
+/*
+ * 处理一帧 K230 目标：无目标或置信度不足时保持当前位置；有效目标依次经过死区、比例、
+ * 单帧步长和机械范围限制后更新云台。HOLD 不关闭 PWM，与链路超时禁用状态不同。
+ */
 static void App_K230Follow_ProcessFrame(const K230_TargetFrame *frame)
 {
     int16_t requested_pan_delta;
@@ -551,15 +667,14 @@ static void App_K230Follow_ProcessFrame(const K230_TargetFrame *frame)
     uint16_t previous_pan;
     uint16_t previous_tilt;
 
-    if ((frame->detected == 0U) ||
-        (frame->confidence < K230_MIN_CONFIDENCE)) {
+    if ((frame->detected == 0U) || (frame->confidence < K230_MIN_CONFIDENCE)) {
         g_k230_control_error_x = 0;
         g_k230_control_error_y = 0;
         g_k230_pan_delta = 0;
         g_k230_tilt_delta = 0;
         App_K230Follow_ResetPidState();
         g_k230_follow_state = APP_K230_FOLLOW_STATE_HOLD;
-        return; // 无目标或低置信度时保持当前位置，并清除 PID 历史状态。
+        return;
     }
 
     g_k230_control_error_x = App_K230Follow_FilterError(
@@ -605,12 +720,10 @@ static void App_K230Follow_ProcessFrame(const K230_TargetFrame *frame)
     previous_tilt = g_k230_tilt_compare;
     next_pan = App_K230Follow_LimitInt32(
         (int32_t) previous_pan + requested_pan_delta,
-        BSP_PTZ_PAN_MIN,
-        BSP_PTZ_PAN_MAX);
+        BSP_PTZ_PAN_MIN, BSP_PTZ_PAN_MAX);
     next_tilt = App_K230Follow_LimitInt32(
         (int32_t) previous_tilt + requested_tilt_delta,
-        BSP_PTZ_TILT_MIN,
-        BSP_PTZ_TILT_MAX);
+        BSP_PTZ_TILT_MIN, BSP_PTZ_TILT_MAX);
 
     g_k230_pan_compare = (uint16_t) next_pan;
     g_k230_tilt_compare = (uint16_t) next_tilt;
@@ -621,23 +734,23 @@ static void App_K230Follow_ProcessFrame(const K230_TargetFrame *frame)
     g_k230_follow_update_count++;
 }
 
+/*
+ * 高频轮询 K230 协议并消费最新帧。每次进入模式先保持中心两秒；链路超时后关闭 PWM，
+ * 收到新的合法帧时恢复引脚复用和超时前位置，无需用户重新选择模式。
+ */
 static void App_K230Follow_Task(void)
 {
     K230_TargetFrame frame;
 
+    Protocol_K230_Task();
+
     if ((uint32_t) (Bsp_Time_GetMilliseconds() - g_k230_follow_start_ms) <
         APP_K230_FOLLOW_STARTUP_HOLD_MS) {
-        (void) Protocol_K230_TakeLatestFrame(&frame); // 丢弃启动阶段旧帧，保持结束后只响应新目标。
-
-        /*
-         * 启动阶段持续写入中心命令，使 K230 已经通信时也必须先完成回中。
-         * 同步软件保存值，保证两秒后的第一次跟随增量从中心位置开始计算。
-         */
+        (void) Protocol_K230_TakeLatestFrame(&frame);
         g_k230_pan_compare = BSP_PTZ_PAN_CENTER;
         g_k230_tilt_compare = BSP_PTZ_TILT_CENTER;
         Bsp_Ptz_SetCompare(g_k230_tilt_compare, g_k230_pan_compare);
-
-        g_k230_follow_seen_timeout_count = g_k230_timeout_count; // 启动阶段的历史超时不能在两秒后误关闭已恢复链路。
+        g_k230_follow_seen_timeout_count = g_k230_timeout_count;
         g_k230_control_error_x = 0;
         g_k230_control_error_y = 0;
         g_k230_pan_delta = 0;
@@ -666,154 +779,48 @@ static void App_K230Follow_Task(void)
     if (Protocol_K230_TakeLatestFrame(&frame) == 0U) {
         return;
     }
+
     if (g_k230_follow_state == APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED) {
         if (g_k230_link_alive == 0U) {
             return;
         }
 
-        Bsp_Ptz_Init(); // 恢复 PB4/PB1 的 PWM 复用，此时定时器仍保持停止。
-        Bsp_Ptz_SetCompare(g_k230_tilt_compare, g_k230_pan_compare); // 启动前写回超时前位置，避免恢复时突然回中。
+        Bsp_Ptz_Init();
+        Bsp_Ptz_SetCompare(g_k230_tilt_compare, g_k230_pan_compare);
         Bsp_Ptz_Start();
     }
 
     App_K230Follow_ProcessFrame(&frame);
 }
-#endif
 
-void App_Init(void)
+/*
+ * 方形赛道直角状态机：
+ * 正常巡线 --中心线连续缺失--> 主动制动 --等待若干周期--> 固定方向原地转向。
+ * 只有检测到具有真实黑线宽度且误差接近中心的线才退出转向；最大转向周期用于防止永久卡死。
+ * seen_center_line 可避免上电尚未见线时误触发，black_width==0 的弱边沿保持帧不能作为重捕获依据。
+ *
+ * @return 1 表示本周期由角点状态机接管电机；0 表示继续执行通用巡线。
+ */
+static uint8_t App_SquareCornerTask(void)
 {
-    g_app_debug_mode = APP_MODE; // Write the mode at runtime so CCS Watch can verify the loaded firmware.
-    Bsp_Gpio_Init();
-    Bsp_Uart_Init();
-#if (APP_MODE == APP_MODE_MOTOR_PWM) || (APP_MODE == APP_MODE_LINE_FOLLOW) || \
-    (APP_MODE == APP_MODE_CCD_STRAIGHT) || (APP_MODE == APP_MODE_SPEED_TEST) || \
-    (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_SQUARE_FOLLOW)
-    Bsp_Motor_Init();
-#else
-    Bsp_Motor_Disable(); // Non-motor debug modes must keep PWM and H-bridge outputs idle.
-#endif
-#if APP_MODE == APP_MODE_K230_FOLLOW
-    Bsp_Ptz_Init(); // Load safe center compare values before the first servo PWM frame.
-    Bsp_Ptz_Start(); // Only the K230 follow mode enables the dual-axis servo output.
-    g_k230_control_error_x = 0;
-    g_k230_control_error_y = 0;
-    g_k230_pan_delta = 0;
-    g_k230_tilt_delta = 0;
-    App_K230Follow_ResetPidState();
-    g_k230_pan_compare = BSP_PTZ_PAN_CENTER;
-    g_k230_tilt_compare = BSP_PTZ_TILT_CENTER;
-    g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK;
-    g_k230_follow_update_count = 0U;
-#elif (APP_MODE != APP_MODE_UART_TEST) && (APP_MODE != APP_MODE_CCD_WATCH) && (APP_MODE != APP_MODE_K230_UART)
-    Bsp_Ptz_Disable(); // Full SysConfig modes that do not use the PTZ must force both servo signals low.
-#endif
-#if (APP_MODE == APP_MODE_ENCODER_WATCH) || (APP_MODE == APP_MODE_SPEED_TEST) || \
-    (APP_MODE == APP_MODE_LINE_FOLLOW) || (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || \
-    (APP_MODE == APP_MODE_SQUARE_FOLLOW)
-    Bsp_Motor_EncoderInit(); // Enable 2025-board encoder pins PB13/PB20 and PB15/PB17.
-#endif
-#if (APP_MODE == APP_MODE_SPEED_TEST) || (APP_MODE == APP_MODE_LINE_FOLLOW) || \
-    (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_SQUARE_FOLLOW)
-    Bsp_Motor_SpeedPidInit(); // Prepare both wheel-speed PI controllers before closed-loop driving.
-#endif
-#if APP_MODE == APP_MODE_CCD_ADC
-    Bsp_Uart_K230_SendString("BOOT,CCD\r\n"); // Early UART marker proves the selected COM port is receiving firmware output.
-    Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC before the first frame read.
-#elif APP_MODE == APP_MODE_CCD_WATCH
-    Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC for debugger-watch CCD sampling.
-#elif (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_LINE_FOLLOW) || \
-    (APP_MODE == APP_MODE_SQUARE_FOLLOW)
-    Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC before the single line-follow controller.
-    Bsp_Gpio_SetHeartbeat(0U); // Keep the heartbeat under loop control during CCD bringup.
-#elif APP_MODE == APP_MODE_CCD_STRAIGHT
-    Bsp_Ccd_Init(); // Prepare CCD SI/CLK pins and ADC before straight-only CCD gating.
-#elif APP_MODE == APP_MODE_UART_TEST
-    Bsp_Uart_K230_SendString("BOOT,UART_TEST\r\n"); // Early marker proves the selected COM port is receiving firmware output.
-#elif APP_MODE == APP_MODE_ENCODER_WATCH
-    Bsp_Gpio_SetHeartbeat(0U); // Keep heartbeat under software control while encoder samples update.
-#elif APP_MODE == APP_MODE_SPEED_TEST
-    Bsp_Gpio_SetHeartbeat(0U); // Keep heartbeat under software control while the speed loop is running.
-#endif
-    Protocol_K230_Init();
-#if APP_MODE == APP_MODE_K230_FOLLOW
-    g_k230_follow_seen_timeout_count = g_k230_timeout_count;
-    g_k230_follow_start_ms = Bsp_Time_GetMilliseconds();
-#endif
-    PID_InitDefaults();
-}
+    uint8_t line_valid = Bsp_Ccd_IsLineValid();
+    int16_t line_error = Bsp_Ccd_GetLineError();
+    int16_t abs_error = (line_error < 0) ? (int16_t) (-line_error) : line_error;
+    uint16_t black_width = Bsp_Ccd_GetBlackWidth();
+    uint8_t center_detected = ((line_valid != 0U) && (black_width != 0U) &&
+                               (abs_error < APP_SQUARE_CORNER_ENTER_ERROR)) ? 1U : 0U;
+    uint8_t center_missing = ((line_valid == 0U) || (black_width == 0U) ||
+                              (abs_error >= APP_SQUARE_CORNER_ENTER_ERROR)) ? 1U : 0U;
 
-void App_Loop(void)
-{
-#if APP_MODE == APP_MODE_HEARTBEAT
-    Bsp_Gpio_ToggleHeartbeat();
-    delay_cycles(16000000);
-#elif APP_MODE == APP_MODE_K230_UART
-    Protocol_K230_Task();
-#elif APP_MODE == APP_MODE_K230_FOLLOW
-    Protocol_K230_Task();
-    App_K230Follow_Task(); // Consume each new target frame once and update the two servo commands.
-#elif APP_MODE == APP_MODE_MOTOR_PWM
-    Bsp_Motor_Set(APP_MOTOR_TEST_SLOW_SPEED, APP_MOTOR_TEST_FAST_SPEED); // Right command is faster; the car should yaw left if mapping is correct.
-    delay_cycles(APP_DELAY_2S);
-    Bsp_Motor_Stop();
-    delay_cycles(APP_DELAY_PAUSE);
-
-    Bsp_Motor_Set(APP_MOTOR_TEST_FAST_SPEED, APP_MOTOR_TEST_SLOW_SPEED); // Left command is faster; the car should yaw right if mapping is correct.
-    delay_cycles(APP_DELAY_2S);
-    Bsp_Motor_Stop();
-    delay_cycles(APP_DELAY_2S);
-#elif APP_MODE == APP_MODE_CCD_ADC
-    Bsp_Ccd_ReadFrame(); // Capture one 128-pixel CCD line.
-    Bsp_Ccd_Process(); // Calculate the detected line center and signed center error.
-    Bsp_Ccd_PrintDebugFrame(); // Send target, error, edge strength, and raw pixels over UART.
-    delay_cycles(APP_CCD_PRINT_DELAY);
-#elif APP_MODE == APP_MODE_CCD_WATCH
-    Bsp_Ccd_ReadFrame(); // Capture one 128-pixel CCD line for debugger inspection.
-    Bsp_Ccd_Process(); // Calculate line center and signed error before mirroring debug values.
-    App_UpdateCcdWatchData(); // Copy CCD results to volatile globals for CCS Watch/Expressions.
-    Bsp_Gpio_ToggleHeartbeat(); // LED heartbeat confirms frames are updating without UART.
-    delay_cycles(APP_CCD_PRINT_DELAY);
-#elif (APP_MODE == APP_MODE_CIRCLE_FOLLOW) || (APP_MODE == APP_MODE_LINE_FOLLOW) || \
-    (APP_MODE == APP_MODE_SQUARE_FOLLOW)
-    Bsp_Ccd_ReadFrame(); // Capture the latest line position before each CCD steering update.
-    Bsp_Ccd_Process(); // Convert CCD pixels into a valid flag and centered error.
-    g_line_raw_min = Bsp_Ccd_GetRawMin();
-    g_line_raw_max = Bsp_Ccd_GetRawMax();
-    g_line_raw_min_index = Bsp_Ccd_GetRawMinIndex();
-    g_line_raw_max_index = Bsp_Ccd_GetRawMaxIndex();
-    g_line_contrast = Bsp_Ccd_GetContrast(); // Keep illumination diagnostics visible on both valid and lost frames.
-#if APP_MODE == APP_MODE_SQUARE_FOLLOW
-    uint8_t square_corner_handled = 0U;
-    uint8_t square_line_valid = Bsp_Ccd_IsLineValid();
-    int16_t square_line_error = Bsp_Ccd_GetLineError();
-    int16_t square_abs_error = (square_line_error < 0) ?
-                               (int16_t) (-square_line_error) :
-                               square_line_error;
-    uint16_t square_black_width = Bsp_Ccd_GetBlackWidth();
-    uint8_t square_center_detected = ((square_line_valid != 0U) &&
-                                      (square_black_width != 0U) &&
-                                      (square_abs_error < APP_SQUARE_CORNER_ENTER_ERROR)) ?
-                                     1U :
-                                     0U;
-    uint8_t square_center_missing = ((square_line_valid == 0U) ||
-                                     (square_black_width == 0U) ||
-                                     (square_abs_error >= APP_SQUARE_CORNER_ENTER_ERROR)) ?
-                                    1U :
-                                    0U;
-    float square_corner_left_cmd = 0.0f;
-    float square_corner_right_cmd = 0.0f;
-
-    if (square_center_detected != 0U) {
+    if (center_detected != 0U) {
         g_square_seen_center_line = 1U;
         g_square_center_missing_count = 0U;
-    } else if (square_center_missing != 0U) {
-        if (g_square_center_missing_count < APP_SQUARE_CORNER_MISSING_LOOPS) {
-            g_square_center_missing_count++;
-        }
+    } else if ((center_missing != 0U) &&
+               (g_square_center_missing_count < APP_SQUARE_CORNER_MISSING_LOOPS)) {
+        g_square_center_missing_count++;
     }
 
-    if ((g_square_corner_state == 0U) &&
-        (g_square_seen_center_line != 0U) &&
+    if ((g_square_corner_state == 0U) && (g_square_seen_center_line != 0U) &&
         (g_square_center_missing_count >= APP_SQUARE_CORNER_MISSING_LOOPS)) {
         g_square_corner_state = 1U;
         g_square_corner_count = 0U;
@@ -822,265 +829,661 @@ void App_Loop(void)
         g_square_corner_entry_count++;
         Bsp_Motor_SpeedPidStop();
         g_line_last_correction = 0.0f;
-        square_corner_handled = 1U;
+        return 1U;
     }
 
-    if ((g_square_corner_state != 0U) && (square_corner_handled == 0U)) {
-        if ((square_line_valid != 0U) &&
-            (square_black_width != 0U) &&
-            (square_abs_error <= APP_SQUARE_CORNER_EXIT_ERROR)) {
+    if (g_square_corner_state == 0U) {
+        return 0U;
+    }
+
+    if ((line_valid != 0U) && (black_width != 0U) &&
+        (abs_error <= APP_SQUARE_CORNER_EXIT_ERROR)) {
+        g_square_corner_state = 0U;
+        g_square_corner_count = 0U;
+        g_line_lost_count = 0U;
+        g_line_last_error = line_error;
+        g_line_last_correction = 0.0f;
+        g_square_seen_center_line = 1U;
+        return 0U;
+    }
+
+    if (g_square_corner_state == 1U) {
+        Bsp_Motor_SpeedPidStop();
+        g_square_corner_count++;
+        if (g_square_corner_count >= APP_SQUARE_CORNER_BRAKE_LOOPS) {
+            g_square_corner_state = 2U;
+            g_square_corner_count = 0U;
+        }
+        g_line_left_cmd = 0.0f;
+        g_line_right_cmd = 0.0f;
+    } else {
+        float pivot = APP_SQUARE_CORNER_PIVOT_SPEED *
+                      (float) g_square_corner_direction;
+
+        App_LineApplySpeedPid(pivot, -pivot);
+        g_line_left_cmd = pivot;
+        g_line_right_cmd = -pivot;
+        g_square_corner_count++;
+        if (g_square_corner_count >= APP_SQUARE_CORNER_MAX_PIVOT_LOOPS) {
             g_square_corner_state = 0U;
             g_square_corner_count = 0U;
-            g_line_lost_count = 0U;
-            g_line_last_error = square_line_error;
             g_line_last_correction = 0.0f;
-            g_square_seen_center_line = 1U;
-        } else if (g_square_corner_state == 1U) {
-            Bsp_Motor_SpeedPidStop();
-            g_square_corner_count++;
-            if (g_square_corner_count >= APP_SQUARE_CORNER_BRAKE_LOOPS) {
-                g_square_corner_state = 2U;
-                g_square_corner_count = 0U;
-            }
-            square_corner_handled = 1U;
-        } else {
-            float left_cmd;
-            float right_cmd;
-            float pivot = APP_SQUARE_CORNER_PIVOT_SPEED *
-                          (float) g_square_corner_direction;
-
-            left_cmd = pivot;
-            right_cmd = -pivot;
-            App_LineApplySpeedPid(left_cmd, right_cmd);
-            square_corner_left_cmd = left_cmd;
-            square_corner_right_cmd = right_cmd;
-            g_square_corner_count++;
-            if (g_square_corner_count >= APP_SQUARE_CORNER_MAX_PIVOT_LOOPS) {
-                g_square_corner_state = 0U;
-                g_square_corner_count = 0U;
-                g_line_last_correction = 0.0f;
-            }
-            square_corner_handled = 1U;
         }
-
-        g_line_valid = square_line_valid;
-        g_line_target = square_line_valid ? Bsp_Ccd_GetTargetIndex() : -1;
-        g_line_error = square_line_valid ? square_line_error : g_line_last_error;
-        g_line_error_delta = 0;
-        g_line_dx_max = Bsp_Ccd_GetDxMax();
-        g_line_dx_min = Bsp_Ccd_GetDxMin();
-        g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex();
-        g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex();
-        g_line_correction = 0.0f;
-        g_line_left_cmd = square_corner_left_cmd;
-        g_line_right_cmd = square_corner_right_cmd;
     }
 
-    if ((square_corner_handled == 0U) && (Bsp_Ccd_IsLineValid() != 0U)) {
-#else
+    g_line_valid = line_valid;
+    g_line_target = line_valid ? Bsp_Ccd_GetTargetIndex() : -1;
+    g_line_error = line_valid ? line_error : g_line_last_error;
+    g_line_error_delta = 0;
+    g_line_correction = 0.0f;
+    return 1U;
+}
+
+/*
+ * 通用 20 ms CCD 巡线任务：
+ * 1. 采样 CCD 并更新诊断量；方形模式先允许直角状态机接管。
+ * 2. 有效线时按像素误差计算 PD 修正，并根据误差分级降速、保证最小转向、限制幅值和变化率。
+ * 3. 短时丢线沿最后有效方向低速搜索，超过 profile 规定窗口后主动停车。
+ */
+static void App_FollowTask(const App_FollowProfile *profile, uint8_t square_mode)
+{
+    int16_t line_error;
+    int16_t error_delta;
+    int16_t abs_error;
+    float base_speed;
+    float steer_limit;
+    float min_steer;
+    float correction;
+    float left_cmd;
+    float right_cmd;
+
+    if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
+        return;
+    }
+
+    Bsp_Ccd_ReadFrame();
+    Bsp_Ccd_Process();
+    g_line_raw_min = Bsp_Ccd_GetRawMin();
+    g_line_raw_max = Bsp_Ccd_GetRawMax();
+    g_line_raw_min_index = Bsp_Ccd_GetRawMinIndex();
+    g_line_raw_max_index = Bsp_Ccd_GetRawMaxIndex();
+    g_line_contrast = Bsp_Ccd_GetContrast();
+    g_line_dx_max = Bsp_Ccd_GetDxMax();
+    g_line_dx_min = Bsp_Ccd_GetDxMin();
+    g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex();
+    g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex();
+
+    if ((square_mode != 0U) && (App_SquareCornerTask() != 0U)) {
+        Bsp_Gpio_ToggleHeartbeat();
+        return;
+    }
+
     if (Bsp_Ccd_IsLineValid() != 0U) {
-#endif
-        int16_t line_error = Bsp_Ccd_GetLineError();
-        int16_t error_delta = (int16_t) (line_error - g_line_last_error);
-        int16_t abs_error = (line_error < 0) ? (int16_t) (-line_error) : line_error;
-        float base_speed = APP_FOLLOW_BASE_SPEED;
-        float steer_limit = APP_FOLLOW_STEER_LIMIT;
-        float min_steer = 0.0f;
-        float correction = APP_FOLLOW_STEER_SIGN *
-                           ((APP_FOLLOW_KP * (float) line_error) +
-                            (APP_FOLLOW_KD * (float) error_delta));
-        float left_cmd;
-        float right_cmd;
+        line_error = Bsp_Ccd_GetLineError();
+        error_delta = (int16_t) (line_error - g_line_last_error);
+        abs_error = (line_error < 0) ? (int16_t) (-line_error) : line_error;
+        base_speed = profile->base_speed;
+        steer_limit = profile->steer_limit;
+        min_steer = 0.0f;
+        correction = profile->steer_sign *
+                     ((profile->kp * (float) line_error) +
+                      (profile->kd * (float) error_delta));
 
         if (abs_error <= APP_LINE_DEADBAND_ERROR) {
-            correction = 0.0f; // Keep center-line jitter from causing visible dithering.
-            error_delta = 0; // Keep the derivative Watch value quiet inside the deadband.
-        } else if (abs_error >= APP_FOLLOW_LARGE_ERROR) {
-            base_speed = APP_FOLLOW_BASE_SPEED * APP_FOLLOW_LARGE_SPEED_SCALE; // Slow aggressively on large errors so bends do not run wide.
-            steer_limit = APP_FOLLOW_STEER_LIMIT; // Keep full steering authority during recovery.
-            min_steer = APP_FOLLOW_LARGE_MIN_STEER; // Force enough steering before the car runs wide.
-        } else if (abs_error >= APP_FOLLOW_MEDIUM_ERROR) {
-            base_speed = APP_FOLLOW_BASE_SPEED * APP_FOLLOW_MEDIUM_SPEED_SCALE; // Slow earlier on medium errors.
-            steer_limit = APP_FOLLOW_STEER_LIMIT * 0.75f; // Moderate correction before the error becomes large.
-            min_steer = APP_FOLLOW_MEDIUM_MIN_STEER; // Make medium-error correction visible on the chassis.
+            correction = 0.0f;
+            error_delta = 0;
+        } else if (abs_error >= profile->large_error) {
+            base_speed = profile->base_speed * profile->large_speed_scale;
+            min_steer = profile->large_min_steer;
+        } else if (abs_error >= profile->medium_error) {
+            base_speed = profile->base_speed * profile->medium_speed_scale;
+            steer_limit = profile->steer_limit * 0.75f;
+            min_steer = profile->medium_min_steer;
         } else {
-            steer_limit = APP_FOLLOW_STEER_LIMIT * 0.45f; // Keep tiny corrections gentle near the center line.
+            steer_limit = profile->steer_limit * 0.45f;
         }
 
         if (line_error > 0) {
-            g_line_recover_direction = 1; // Remember the last valid line side for short lost-line recovery.
+            g_line_recover_direction = 1;
         } else if (line_error < 0) {
-            g_line_recover_direction = -1; // Remember the last valid line side for short lost-line recovery.
+            g_line_recover_direction = -1;
         }
 
-        if ((min_steer > 0.0f) && (correction < min_steer) && (correction > -min_steer)) {
+        if ((min_steer > 0.0f) && (correction < min_steer) &&
+            (correction > -min_steer)) {
             correction = (line_error > 0) ?
-                         (APP_FOLLOW_STEER_SIGN * min_steer) :
-                         (-APP_FOLLOW_STEER_SIGN * min_steer);
+                         (profile->steer_sign * min_steer) :
+                         (-profile->steer_sign * min_steer);
         }
 
         correction = App_LimitFloat(correction, steer_limit);
-        correction = App_LimitFloatDelta(correction,
-                                         g_line_last_correction,
-                                         APP_LINE_CORRECTION_SLEW_LIMIT);
+        correction = App_LimitFloatDelta(
+            correction, g_line_last_correction, APP_LINE_CORRECTION_SLEW_LIMIT);
         left_cmd = base_speed + correction;
         right_cmd = base_speed - correction;
         App_LineApplySpeedPid(left_cmd, right_cmd);
 
-        g_line_valid = 1U; // Mirror drive state for Watch/Expressions.
-        g_line_lost_count = 0U; // Reset the simple CCD lost-line recovery counter after a valid target.
-        g_line_target = Bsp_Ccd_GetTargetIndex(); // Mirror CCD target for Watch/Expressions.
-        g_line_error = line_error; // Mirror fixed-center error for Watch/Expressions.
-        g_line_error_delta = error_delta; // Mirror derivative input for Watch/Expressions.
-        g_line_dx_max = Bsp_Ccd_GetDxMax(); // Mirror strongest positive edge for Watch/Expressions.
-        g_line_dx_min = Bsp_Ccd_GetDxMin(); // Mirror strongest negative edge for Watch/Expressions.
-        g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Mirror positive-edge index for Watch/Expressions.
-        g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Mirror negative-edge index for Watch/Expressions.
-        g_line_correction = correction; // Mirror limited CCD steering correction.
-        g_line_left_cmd = left_cmd; // Mirror left command for Watch/Expressions.
-        g_line_right_cmd = right_cmd; // Mirror right command for Watch/Expressions.
-        g_line_last_error = line_error; // Store current error for the next derivative update.
-        g_line_last_correction = correction; // Store smoothed steering for the next slew-limit step.
-    }
-#if APP_MODE == APP_MODE_SQUARE_FOLLOW
-    else if (square_corner_handled == 0U) {
-        g_line_recover_direction = APP_SQUARE_CORNER_DEFAULT_DIRECTION;
-#else
-    else {
-#endif
-        float left_cmd = 0.0f;
-        float right_cmd = 0.0f;
-        float correction = 0.0f;
+        g_line_valid = 1U;
+        g_line_lost_count = 0U;
+        g_line_target = Bsp_Ccd_GetTargetIndex();
+        g_line_error = line_error;
+        g_line_error_delta = error_delta;
+        g_line_correction = correction;
+        g_line_left_cmd = left_cmd;
+        g_line_right_cmd = right_cmd;
+        g_line_last_error = line_error;
+        g_line_last_correction = correction;
+    } else {
+        correction = 0.0f;
+        left_cmd = 0.0f;
+        right_cmd = 0.0f;
+        if (square_mode != 0U) {
+            g_line_recover_direction = APP_SQUARE_CORNER_DEFAULT_DIRECTION;
+        }
 
-        if ((g_line_lost_count < APP_FOLLOW_LOST_RECOVER_MAX) &&
+        if ((g_line_lost_count < profile->lost_recover_max) &&
             (g_line_recover_direction != 0)) {
-            float base_speed = APP_FOLLOW_BASE_SPEED * APP_FOLLOW_LOST_SPEED_SCALE;
-
-            correction = APP_FOLLOW_STEER_SIGN *
-                         APP_FOLLOW_LOST_TURN *
+            base_speed = profile->base_speed * profile->lost_speed_scale;
+            correction = profile->steer_sign * profile->lost_turn *
                          (float) g_line_recover_direction;
-            correction = App_LimitFloatDelta(correction,
-                                             g_line_last_correction,
-                                             APP_LINE_CORRECTION_SLEW_LIMIT);
+            correction = App_LimitFloatDelta(
+                correction, g_line_last_correction, APP_LINE_CORRECTION_SLEW_LIMIT);
             left_cmd = base_speed + correction;
             right_cmd = base_speed - correction;
-            App_LineApplySpeedPid(left_cmd, right_cmd); // Preserve the frozen lost-line search ratio through wheel-speed PI.
+            App_LineApplySpeedPid(left_cmd, right_cmd);
         } else {
-            Bsp_Motor_Stop(); // Brake after sustained line loss without re-arming the cold-start kick on brief reacquisition.
+            Bsp_Motor_Stop();
         }
-        g_line_valid = 0U; // Mirror lost-line state for Watch/Expressions.
-        g_line_lost_count++; // Count consecutive missing CCD targets for debugging only.
-        g_line_target = -1; // Mirror lost-line target for Watch/Expressions.
-        g_line_error = g_line_last_error; // Keep last valid error visible while bridging a short target dropout.
-        g_line_error_delta = 0; // Clear derivative display while no target is available.
-        g_line_dx_max = Bsp_Ccd_GetDxMax(); // Keep edge diagnostics visible when invalid.
-        g_line_dx_min = Bsp_Ccd_GetDxMin(); // Keep edge diagnostics visible when invalid.
-        g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Keep edge diagnostics visible when invalid.
-        g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Keep edge diagnostics visible when invalid.
-        g_line_correction = correction; // Mirror held steering correction during short target dropouts.
-        g_line_left_cmd = left_cmd; // Mirror lost-line straight/stop command.
-        g_line_right_cmd = right_cmd; // Mirror lost-line straight/stop command.
-        g_line_last_correction = correction; // Keep lost-line recovery continuous with valid steering.
+
+        g_line_valid = 0U;
+        g_line_lost_count++;
+        g_line_target = -1;
+        g_line_error = g_line_last_error;
+        g_line_error_delta = 0;
+        g_line_correction = correction;
+        g_line_left_cmd = left_cmd;
+        g_line_right_cmd = right_cmd;
+        g_line_last_correction = correction;
     }
-    Bsp_Gpio_ToggleHeartbeat(); // Heartbeat confirms the CCD line-follow loop is running.
-    delay_cycles(APP_FOLLOW_LOOP_DELAY);
-#elif APP_MODE == APP_MODE_CCD_STRAIGHT
-    Bsp_Ccd_ReadFrame(); // Capture the latest line position before straight-only gating.
-    Bsp_Ccd_Process(); // Detect whether a valid black line exists without using error for steering.
+
+    Bsp_Gpio_ToggleHeartbeat();
+}
+
+/* 基础联调模式：CCD 有效时以固定比例等速直行，无有效线立即主动停车。 */
+static void App_CcdStraightTask(void)
+{
+    if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
+        return;
+    }
+
+    Bsp_Ccd_ReadFrame();
+    Bsp_Ccd_Process();
     if (Bsp_Ccd_IsLineValid() != 0U) {
-        Bsp_Motor_Set(APP_CCD_STRAIGHT_SPEED, APP_CCD_STRAIGHT_SPEED); // Drive both wheels equally to isolate motor mismatch from steering logic.
-        g_line_valid = 1U; // Mirror drive state for Watch/Expressions.
-        g_line_target = Bsp_Ccd_GetTargetIndex(); // Mirror CCD target while straight-only driving.
-        g_line_error = Bsp_Ccd_GetLineError(); // Mirror CCD error without feeding it back into motor commands.
-        g_line_dx_max = Bsp_Ccd_GetDxMax(); // Mirror strongest positive edge for Watch/Expressions.
-        g_line_dx_min = Bsp_Ccd_GetDxMin(); // Mirror strongest negative edge for Watch/Expressions.
-        g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Mirror positive-edge index for Watch/Expressions.
-        g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Mirror negative-edge index for Watch/Expressions.
-        g_line_correction = 0.0f; // Mirror zero correction because straight-only mode does not steer.
-        g_line_left_cmd = APP_CCD_STRAIGHT_SPEED; // Mirror fixed left command for Watch/Expressions.
-        g_line_right_cmd = APP_CCD_STRAIGHT_SPEED; // Mirror fixed right command for Watch/Expressions.
+        Bsp_Motor_Set(APP_CCD_STRAIGHT_SPEED, APP_CCD_STRAIGHT_SPEED);
+        g_line_valid = 1U;
+        g_line_target = Bsp_Ccd_GetTargetIndex();
+        g_line_error = Bsp_Ccd_GetLineError();
+        g_line_left_cmd = APP_CCD_STRAIGHT_SPEED;
+        g_line_right_cmd = APP_CCD_STRAIGHT_SPEED;
     } else {
-        Bsp_Motor_Stop(); // Stop immediately when CCD does not see a valid line.
-        g_line_valid = 0U; // Mirror lost-line state for Watch/Expressions.
-        g_line_target = -1; // Mirror lost-line target for Watch/Expressions.
-        g_line_error = 0; // Mirror lost-line error for Watch/Expressions.
-        g_line_dx_max = Bsp_Ccd_GetDxMax(); // Keep last edge strength visible even when the line is rejected.
-        g_line_dx_min = Bsp_Ccd_GetDxMin(); // Keep last edge strength visible even when the line is rejected.
-        g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex(); // Keep last edge index visible even when the line is rejected.
-        g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex(); // Keep last edge index visible even when the line is rejected.
-        g_line_correction = 0.0f; // Mirror stopped correction for Watch/Expressions.
-        g_line_left_cmd = 0.0f; // Mirror stopped left command for Watch/Expressions.
-        g_line_right_cmd = 0.0f; // Mirror stopped right command for Watch/Expressions.
+        Bsp_Motor_Stop();
+        g_line_valid = 0U;
+        g_line_target = -1;
+        g_line_error = 0;
+        g_line_left_cmd = 0.0f;
+        g_line_right_cmd = 0.0f;
     }
-    Bsp_Gpio_ToggleHeartbeat(); // LED heartbeat confirms the straight-only CCD loop is running.
-    delay_cycles(APP_LINE_LOOP_DELAY);
-#elif APP_MODE == APP_MODE_ENCODER_WATCH
-    Bsp_Motor_EncoderSample(); // Update per-window encoder speeds without driving the motors.
-    g_encoder_left_count = Bsp_Motor_GetLeftEncoderCount(); // Mirror logical-left accumulated ticks for Watch/Expressions.
-    g_encoder_right_count = Bsp_Motor_GetRightEncoderCount(); // Mirror logical-right accumulated ticks for Watch/Expressions.
-    g_encoder_left_speed = Bsp_Motor_GetLeftEncoderSpeed(); // Mirror logical-left sample ticks for Watch/Expressions.
-    g_encoder_right_speed = Bsp_Motor_GetRightEncoderSpeed(); // Mirror logical-right sample ticks for Watch/Expressions.
-    g_speed_left_target = 0.0f; // Encoder-watch mode has no speed target.
-    g_speed_right_target = 0.0f; // Encoder-watch mode has no speed target.
-    g_speed_left_cmd = 0.0f; // Encoder-watch mode keeps motor output disabled.
-    g_speed_right_cmd = 0.0f; // Encoder-watch mode keeps motor output disabled.
-    Bsp_Gpio_ToggleHeartbeat(); // Heartbeat confirms encoder sampling is alive.
-    delay_cycles(APP_ENCODER_WATCH_DELAY);
-#elif APP_MODE == APP_MODE_SPEED_TEST
-    static uint32_t speed_test_loop = 0U;
+    g_line_dx_max = Bsp_Ccd_GetDxMax();
+    g_line_dx_min = Bsp_Ccd_GetDxMin();
+    g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex();
+    g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex();
+    g_line_correction = 0.0f;
+    Bsp_Gpio_ToggleHeartbeat();
+}
 
-    if (speed_test_loop == 0U) {
-        Bsp_Motor_SpeedPidStop(); // Reset output, integral, derivative history and target before each test cycle.
-        Bsp_Motor_EncoderReset(); // Restart both corrected encoder channels from comparable totals.
+/*
+ * 非阻塞电机映射测试：左慢右快 2 s、制动 1 s、左快右慢 2 s、制动 2 s 后循环。
+ * 任务每次立即返回，因此串口屏 STOP 可以在任意阶段被处理。
+ */
+static void App_MotorTestTask(void)
+{
+    uint32_t now_ms = Bsp_Time_GetMilliseconds();
+    uint32_t elapsed_ms = (uint32_t) (now_ms - g_motor_test_phase_start_ms);
+
+    switch (g_motor_test_phase) {
+        case 0U:
+            if (elapsed_ms == 0U) {
+                Bsp_Motor_Set(APP_MOTOR_TEST_SLOW_SPEED, APP_MOTOR_TEST_FAST_SPEED);
+            }
+            if (elapsed_ms >= 2000U) {
+                Bsp_Motor_Stop();
+                g_motor_test_phase = 1U;
+                g_motor_test_phase_start_ms = now_ms;
+            }
+            break;
+        case 1U:
+            if (elapsed_ms >= 1000U) {
+                Bsp_Motor_Set(APP_MOTOR_TEST_FAST_SPEED, APP_MOTOR_TEST_SLOW_SPEED);
+                g_motor_test_phase = 2U;
+                g_motor_test_phase_start_ms = now_ms;
+            }
+            break;
+        case 2U:
+            if (elapsed_ms >= 2000U) {
+                Bsp_Motor_Stop();
+                g_motor_test_phase = 3U;
+                g_motor_test_phase_start_ms = now_ms;
+            }
+            break;
+        default:
+            if (elapsed_ms >= 2000U) {
+                Bsp_Motor_Set(APP_MOTOR_TEST_SLOW_SPEED, APP_MOTOR_TEST_FAST_SPEED);
+                g_motor_test_phase = 0U;
+                g_motor_test_phase_start_ms = now_ms;
+            }
+            break;
+    }
+}
+
+/* 每 20 ms 推进一次 0→20→30→20 cm/s 阶跃，循环刷新速度闭环 Watch 数据。 */
+static void App_SpeedTestTask(void)
+{
+    if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
+        return;
     }
 
-    if (speed_test_loop < APP_SPEED_TEST_WARMUP_LOOPS) {
+    if (g_speed_test_loop < APP_SPEED_TEST_WARMUP_LOOPS) {
         g_speed_test_phase = 0U;
-        Bsp_Motor_SetSpeedTargets(0.0f, 0.0f); // Phase 0: both wheels stopped for five seconds.
-    } else if (speed_test_loop < (APP_SPEED_TEST_WARMUP_LOOPS + APP_SPEED_TEST_HOLD_LOOPS)) {
+        Bsp_Motor_SetSpeedTargets(0.0f, 0.0f);
+    } else if (g_speed_test_loop <
+               (APP_SPEED_TEST_WARMUP_LOOPS + APP_SPEED_TEST_HOLD_LOOPS)) {
         g_speed_test_phase = 1U;
-        Bsp_Motor_SetSpeedTargets(APP_SPEED_TEST_LOW_CM_S, APP_SPEED_TEST_LOW_CM_S); // Phase 1: hold 20 cm/s for five seconds.
-    } else if (speed_test_loop < (APP_SPEED_TEST_WARMUP_LOOPS + (2U * APP_SPEED_TEST_HOLD_LOOPS))) {
+        Bsp_Motor_SetSpeedTargets(APP_SPEED_TEST_LOW_CM_S, APP_SPEED_TEST_LOW_CM_S);
+    } else if (g_speed_test_loop <
+               (APP_SPEED_TEST_WARMUP_LOOPS + (2U * APP_SPEED_TEST_HOLD_LOOPS))) {
         g_speed_test_phase = 2U;
-        Bsp_Motor_SetSpeedTargets(APP_SPEED_TEST_HIGH_CM_S, APP_SPEED_TEST_HIGH_CM_S); // Phase 2: step to 30 cm/s for five seconds.
+        Bsp_Motor_SetSpeedTargets(APP_SPEED_TEST_HIGH_CM_S, APP_SPEED_TEST_HIGH_CM_S);
     } else {
         g_speed_test_phase = 3U;
-        Bsp_Motor_SetSpeedTargets(APP_SPEED_TEST_LOW_CM_S, APP_SPEED_TEST_LOW_CM_S); // Phase 3: return to 20 cm/s for five seconds.
+        Bsp_Motor_SetSpeedTargets(APP_SPEED_TEST_LOW_CM_S, APP_SPEED_TEST_LOW_CM_S);
     }
 
-    Bsp_Motor_SpeedPidUpdate(); // Run the 2025-derived two-wheel speed controller with corrected channel pairing.
-    g_speed_test_loop = speed_test_loop;
-    speed_test_loop++;
-    if (speed_test_loop >= (APP_SPEED_TEST_WARMUP_LOOPS + (3U * APP_SPEED_TEST_HOLD_LOOPS))) {
-        speed_test_loop = 0U; // Repeat stop/20/30/20 so transitions remain easy to observe.
+    Bsp_Motor_SpeedPidUpdate();
+    App_UpdateSpeedWatch();
+    g_speed_test_loop++;
+    if (g_speed_test_loop >=
+        (APP_SPEED_TEST_WARMUP_LOOPS + (3U * APP_SPEED_TEST_HOLD_LOOPS))) {
+        g_speed_test_loop = 0U;
     }
-    g_encoder_left_count = Bsp_Motor_GetLeftEncoderCount(); // Mirror logical-left accumulated ticks for Watch/Expressions.
-    g_encoder_right_count = Bsp_Motor_GetRightEncoderCount(); // Mirror logical-right accumulated ticks for Watch/Expressions.
-    g_encoder_left_speed = Bsp_Motor_GetLeftEncoderSpeed(); // Mirror logical-left measured ticks per sample.
-    g_encoder_right_speed = Bsp_Motor_GetRightEncoderSpeed(); // Mirror logical-right measured ticks per sample.
-    g_speed_left_target = Bsp_Motor_GetLeftSpeedTarget();
-    g_speed_right_target = Bsp_Motor_GetRightSpeedTarget();
-    g_speed_left_measured = Bsp_Motor_GetLeftMeasuredSpeed();
-    g_speed_right_measured = Bsp_Motor_GetRightMeasuredSpeed();
-    g_speed_left_cmd = Bsp_Motor_GetLeftSpeedCommand();
-    g_speed_right_cmd = Bsp_Motor_GetRightSpeedCommand();
-    g_speed_left_p = Bsp_Motor_GetLeftSpeedPTerm();
-    g_speed_right_p = Bsp_Motor_GetRightSpeedPTerm();
-    g_speed_left_i = Bsp_Motor_GetLeftSpeedITerm();
-    g_speed_right_i = Bsp_Motor_GetRightSpeedITerm();
-    g_speed_faults = Bsp_Motor_GetSpeedFaults();
-    Bsp_Gpio_ToggleHeartbeat(); // Heartbeat confirms the repeating 2025-derived speed test is running.
-    delay_cycles(APP_SPEED_TEST_LOOP_DELAY);
-#elif APP_MODE == APP_MODE_UART_TEST
-    static uint32_t uart_test_count = 0U;
-    Bsp_Uart_K230_SendString("UART_TEST,count="); // Periodic marker for COM-port bringup.
-    App_SendUint32(uart_test_count);
-    Bsp_Uart_K230_SendString("\r\n");
-    uart_test_count++;
-    Bsp_Gpio_ToggleHeartbeat(); // LED heartbeat confirms firmware is running even if UART is not visible.
-    delay_cycles(APP_DELAY_1S);
-#else
     Bsp_Gpio_ToggleHeartbeat();
-    delay_cycles(32000000);
-#endif
+}
+
+/*
+ * 执行旧模式专属退出动作。闭环运动模式停止速度控制，原始 PWM 模式主动制动，
+ * K230 跟随关闭云台；随后 App_CompleteModeSwitch() 还会执行统一安全清理。
+ */
+static void App_ModeExit(uint8_t mode)
+{
+    if ((mode == APP_MODE_LINE_FOLLOW) || (mode == APP_MODE_SPEED_TEST) ||
+        (mode == APP_MODE_CIRCLE_FOLLOW) || (mode == APP_MODE_SQUARE_FOLLOW)) {
+        Bsp_Motor_SpeedPidStop();
+    } else if ((mode == APP_MODE_MOTOR_PWM) ||
+               (mode == APP_MODE_CCD_STRAIGHT)) {
+        Bsp_Motor_Stop();
+    }
+
+    if (mode == APP_MODE_K230_FOLLOW) {
+        g_k230_control_error_x = 0;
+        g_k230_control_error_y = 0;
+        g_k230_pan_delta = 0;
+        g_k230_tilt_delta = 0;
+        App_K230Follow_ResetPidState();
+        Bsp_Ptz_Disable();
+    }
+}
+
+/*
+ * 进入目标模式并完成该模式所需的资源初始化或状态复位。
+ * CCD、编码器和速度环只在首次需要时初始化；每次重入都会清理会影响下一次运行的算法历史。
+ * 回拨 g_mode_last_task_ms 使新模式的首次周期任务可以立即执行。
+ *
+ * @return 1 表示模式号受支持且入口完成；0 表示未知模式。
+ */
+static uint8_t App_ModeEnter(uint8_t mode)
+{
+    uint32_t now_ms = Bsp_Time_GetMilliseconds();
+
+    g_mode_last_task_ms = now_ms - APP_LOOP_SLOW_MS;
+    Bsp_Gpio_SetHeartbeat(0U);
+
+    /* 电机停用态会把 PA12/PA13 切为 GPIO 低电平，进入运动模式前必须恢复 PWM 复用。 */
+    if (App_ModeUsesMotor(mode) != 0U) {
+        Bsp_Motor_Init();
+    }
+
+    switch (mode) {
+        case APP_MODE_STOPPED:
+            return 1U;
+        case APP_MODE_HEARTBEAT:
+            return 1U;
+        case APP_MODE_K230_UART:
+            Protocol_K230_Init();
+            return 1U;
+        case APP_MODE_MOTOR_PWM:
+            g_motor_test_phase = 0U;
+            g_motor_test_phase_start_ms = now_ms;
+            Bsp_Motor_Set(APP_MOTOR_TEST_SLOW_SPEED, APP_MOTOR_TEST_FAST_SPEED);
+            return 1U;
+        case APP_MODE_CCD_ADC:
+            App_EnsureCcd();
+            Bsp_Uart_K230_SendString("BOOT,CCD\r\n");
+            return 1U;
+        case APP_MODE_UART_TEST:
+            g_uart_test_count = 0U;
+            Bsp_Uart_K230_SendString("BOOT,UART_TEST\r\n");
+            return 1U;
+        case APP_MODE_CCD_WATCH:
+            App_EnsureCcd();
+            return 1U;
+        case APP_MODE_LINE_FOLLOW:
+            App_EnsureCcd();
+            Bsp_Ccd_ResetState(); // 模式重入时丢弃其他 CCD 模式留下的目标和帧历史。
+            App_EnsureSpeedPid();
+            Bsp_Motor_SpeedPidReset();
+            Bsp_Motor_EncoderReset();
+            App_ResetLineState();
+            return 1U;
+        case APP_MODE_CCD_STRAIGHT:
+            App_EnsureCcd();
+            Bsp_Ccd_ResetState(); // 直行判断必须从新帧开始，不能沿用最近有效黑线。
+            App_ResetLineState();
+            return 1U;
+        case APP_MODE_ENCODER_WATCH:
+            App_EnsureEncoder();
+            Bsp_Motor_EncoderReset();
+            return 1U;
+        case APP_MODE_SPEED_TEST:
+            App_EnsureSpeedPid();
+            Bsp_Motor_SpeedPidStop();
+            Bsp_Motor_EncoderReset();
+            g_speed_test_phase = 0U;
+            g_speed_test_loop = 0U;
+            return 1U;
+        case APP_MODE_CIRCLE_FOLLOW:
+            App_EnsureCcd();
+            Bsp_Ccd_ResetState(); // 圆形巡线重新建立当前赛道的有效中心和边沿。
+            App_EnsureSpeedPid();
+            Bsp_Motor_SpeedPidReset();
+            Bsp_Motor_EncoderReset();
+            App_ResetLineState();
+            return 1U;
+        case APP_MODE_K230_FOLLOW:
+            Protocol_K230_Init();
+            Bsp_Ptz_Init();
+            g_k230_control_error_x = 0;
+            g_k230_control_error_y = 0;
+            g_k230_pan_delta = 0;
+            g_k230_tilt_delta = 0;
+            App_K230Follow_ResetPidState();
+            g_k230_pan_compare = BSP_PTZ_PAN_CENTER;
+            g_k230_tilt_compare = BSP_PTZ_TILT_CENTER;
+            Bsp_Ptz_SetCompare(g_k230_tilt_compare, g_k230_pan_compare);
+            Bsp_Ptz_Start();
+            g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK;
+            g_k230_follow_update_count = 0U;
+            g_k230_follow_seen_timeout_count = g_k230_timeout_count;
+            g_k230_follow_start_ms = now_ms;
+            return 1U;
+        case APP_MODE_SQUARE_FOLLOW:
+            App_EnsureCcd();
+            Bsp_Ccd_ResetState(); // 清除历史目标，防止弱边沿帧误触发直角制动和找线。
+            App_EnsureSpeedPid();
+            Bsp_Motor_SpeedPidReset();
+            Bsp_Motor_EncoderReset();
+            App_ResetLineState();
+            App_ResetSquareState();
+            return 1U;
+        default:
+            return 0U;
+    }
+}
+
+/*
+ * 执行当前稳定模式的一次单步任务。各 case 必须尽快返回，任务周期由毫秒门控而非长延时实现。
+ * 只观察数据的模式不会驱动电机；所有运动模式的退出安全性由模式管理器统一保证。
+ */
+static void App_ModeTask(uint8_t mode)
+{
+    switch (mode) {
+        case APP_MODE_STOPPED:
+            /* 停止态仅保留协议处理，不运行执行器任务。 */
+            break;
+        case APP_MODE_HEARTBEAT:
+            if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_SLOW_MS) != 0U) {
+                Bsp_Gpio_ToggleHeartbeat();
+            }
+            break;
+        case APP_MODE_K230_UART:
+            /* 仅验证 K230 文本协议链路，不驱动电机或云台。 */
+            Protocol_K230_Task();
+            break;
+        case APP_MODE_MOTOR_PWM:
+            /* 左右轮快慢交替，验证逻辑轮与物理轮映射。 */
+            App_MotorTestTask();
+            break;
+        case APP_MODE_CCD_ADC:
+            /* 低频打印完整 CCD 帧，避免调试串口被连续大报文占满。 */
+            if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_PRINT_MS) != 0U) {
+                Bsp_Ccd_ReadFrame();
+                Bsp_Ccd_Process();
+                Bsp_Ccd_PrintDebugFrame();
+            }
+            break;
+        case APP_MODE_UART_TEST:
+            /* 每秒发送递增计数，验证 UART TX 和主循环存活。 */
+            if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_SLOW_MS) != 0U) {
+                Bsp_Uart_K230_SendString("UART_TEST,count=");
+                App_SendUint32(g_uart_test_count++);
+                Bsp_Uart_K230_SendString("\r\n");
+                Bsp_Gpio_ToggleHeartbeat();
+            }
+            break;
+        case APP_MODE_CCD_WATCH:
+            /* 不发送大报文，把当前帧和环形日志保存在 RAM 供调试器读取。 */
+            if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_PRINT_MS) != 0U) {
+                Bsp_Ccd_ReadFrame();
+                Bsp_Ccd_Process();
+                App_UpdateCcdWatchData();
+                Bsp_Gpio_ToggleHeartbeat();
+            }
+            break;
+        case APP_MODE_LINE_FOLLOW:
+            /* 普通赛道 profile + 双轮速度闭环。 */
+            App_FollowTask(&g_line_follow_profile, 0U);
+            break;
+        case APP_MODE_CCD_STRAIGHT:
+            /* 只用 CCD 有效性控制固定直行/停车，不进行转向反馈。 */
+            App_CcdStraightTask();
+            break;
+        case APP_MODE_ENCODER_WATCH:
+            /* 仅采样编码器累计量和窗口速度，电机保持关闭。 */
+            if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) != 0U) {
+                Bsp_Motor_EncoderSample();
+                g_encoder_left_count = Bsp_Motor_GetLeftEncoderCount();
+                g_encoder_right_count = Bsp_Motor_GetRightEncoderCount();
+                g_encoder_left_speed = Bsp_Motor_GetLeftEncoderSpeed();
+                g_encoder_right_speed = Bsp_Motor_GetRightEncoderSpeed();
+                Bsp_Gpio_ToggleHeartbeat();
+            }
+            break;
+        case APP_MODE_SPEED_TEST:
+            /* 周期执行双轮等速阶跃，观察速度环跟踪和编码器反馈。 */
+            App_SpeedTestTask();
+            break;
+        case APP_MODE_CIRCLE_FOLLOW:
+            /* 圆形赛道使用独立 profile 入口，便于与普通巡线分开调参。 */
+            App_FollowTask(&g_circle_follow_profile, 0U);
+            break;
+        case APP_MODE_K230_FOLLOW:
+            /* 解析 K230 目标并增量更新双轴云台，链路超时后禁用并在新帧到达时恢复 PWM。 */
+            App_K230Follow_Task();
+            break;
+        case APP_MODE_SQUARE_FOLLOW:
+            /* 方形 profile + 直角制动/原地找线状态机。 */
+            App_FollowTask(&g_square_follow_profile, 1U);
+            break;
+        default:
+            break;
+    }
+}
+
+/*
+ * 提交一次模式切换：
+ * 1. 执行旧模式 Exit；2. 统一禁用电机和云台并复位速度环/编码器；
+ * 3. 进入目标模式；4. 成功后才更新 current_mode，失败则回落 STOPPED；
+ * 5. 通过 TJC 返回最终成功或失败结果。
+ */
+static void App_CompleteModeSwitch(void)
+{
+    uint8_t target_mode = g_app_requested_mode;
+
+    App_ModeExit(g_app_current_mode);
+    Bsp_Motor_Disable();
+    if (g_speed_pid_initialized != 0U) {
+        Bsp_Motor_SpeedPidReset();
+    }
+    if (g_encoder_initialized != 0U) {
+        Bsp_Motor_EncoderReset();
+    }
+    Bsp_Ptz_Disable();
+    Bsp_Ptz_SetCenter();
+
+    if (App_ModeEnter(target_mode) != 0U) {
+        g_app_current_mode = target_mode;
+        g_app_debug_mode = target_mode;
+        g_app_switch_state = APP_SWITCH_IDLE;
+        g_app_mode_switch_count++;
+        Protocol_Tjc_SendResult(
+            (target_mode == APP_MODE_STOPPED) ? TJC_RESULT_STOPPED : TJC_RESULT_SWITCH_OK,
+            g_app_current_mode, g_app_switch_request);
+    } else {
+        g_app_current_mode = APP_MODE_STOPPED;
+        g_app_requested_mode = APP_MODE_STOPPED;
+        g_app_debug_mode = APP_MODE_STOPPED;
+        g_app_switch_state = APP_SWITCH_IDLE;
+        g_app_mode_reject_count++;
+        Protocol_Tjc_SendResult(
+            TJC_RESULT_ENTER_FAILED, g_app_current_mode, g_app_switch_request);
+    }
+}
+
+/* BRAKING 保持至少 100 ms 后转入 ENTERING；ENTERING 在一次调用内完成退出、清理和进入。 */
+static void App_ModeManagerTask(void)
+{
+    if (g_app_switch_state == APP_SWITCH_BRAKING) {
+        if ((uint32_t) (Bsp_Time_GetMilliseconds() - g_app_switch_deadline_ms) <
+            APP_MODE_SWITCH_BRAKE_MS) {
+            return;
+        }
+        g_app_switch_state = APP_SWITCH_ENTERING;
+    }
+
+    if (g_app_switch_state == APP_SWITCH_ENTERING) {
+        App_CompleteModeSwitch();
+    }
+}
+
+/*
+ * 接受外部模式请求并启动异步切换。
+ * 同模式请求直接应答；运动模式先主动制动；STOP 已进入切换流程时拒绝新的非停止请求。
+ * TJC_RESULT_ACCEPTED_BRAKING 只表示请求已受理，不代表目标模式已经开始运行。
+ */
+uint8_t App_RequestMode(uint8_t mode)
+{
+    if (mode > APP_MODE_SQUARE_FOLLOW) {
+        g_app_mode_reject_count++;
+        return 0U;
+    }
+
+    if ((g_app_switch_state == APP_SWITCH_IDLE) &&
+        (mode == g_app_current_mode)) {
+        Protocol_Tjc_SendResult(
+            (mode == APP_MODE_STOPPED) ? TJC_RESULT_STOPPED : TJC_RESULT_ALREADY_ACTIVE,
+            g_app_current_mode, mode);
+        return 1U;
+    }
+
+    if ((g_app_switch_state != APP_SWITCH_IDLE) &&
+        (g_app_requested_mode == APP_MODE_STOPPED) &&
+        (mode != APP_MODE_STOPPED)) {
+        g_app_mode_reject_count++;
+        Protocol_Tjc_SendResult(TJC_RESULT_ACCEPTED_BRAKING,
+                                g_app_current_mode, APP_MODE_STOPPED);
+        return 0U;
+    }
+
+    g_app_requested_mode = mode;
+    g_app_switch_request = mode;
+    Protocol_Tjc_SendResult(
+        TJC_RESULT_ACCEPTED_BRAKING, g_app_current_mode, mode);
+
+    if (App_ModeUsesMotor(g_app_current_mode) != 0U) {
+        Bsp_Motor_SpeedPidStop();
+        Bsp_Motor_Stop();
+        g_app_switch_deadline_ms = Bsp_Time_GetMilliseconds();
+        g_app_switch_state = APP_SWITCH_BRAKING;
+    } else {
+        g_app_switch_state = APP_SWITCH_ENTERING;
+    }
+
+    return 1U;
+}
+
+uint8_t App_GetCurrentMode(void)
+{
+    return g_app_current_mode;
+}
+
+/*
+ * 初始化基础 BSP、统一时基和两路协议。初始化期间显式关闭电机和云台，
+ * 最终把全部运行时状态复位为 STOPPED，并主动发送一帧初始状态。
+ */
+void App_Init(void)
+{
+    Bsp_Gpio_Init();
+    Bsp_Uart_Init();
+    Bsp_Time_Init();
+    Bsp_Motor_Init();
+    Bsp_Motor_Disable();
+    Bsp_Ptz_Disable();
+    Bsp_Ptz_SetCenter();
+    PID_InitDefaults();
+    Protocol_K230_Init();
+    Protocol_Tjc_Init();
+
+    g_app_current_mode = APP_MODE_STOPPED;
+    g_app_requested_mode = APP_MODE_STOPPED;
+    g_app_debug_mode = APP_MODE_STOPPED;
+    g_app_switch_state = APP_SWITCH_IDLE;
+    g_app_mode_switch_count = 0U;
+    g_app_mode_reject_count = 0U;
+    g_ccd_initialized = 0U;
+    g_encoder_initialized = 0U;
+    g_speed_pid_initialized = 0U;
+    App_ResetLineState();
+    App_ResetSquareState();
+    Protocol_Tjc_SendResult(TJC_RESULT_STATE, APP_MODE_STOPPED, TJC_COMMAND_QUERY);
+}
+
+/*
+ * 主循环顺序具有安全意义：先读取屏幕命令，再推进制动/进入状态，最后才运行稳定模式任务。
+ * 切换状态非空闲时暂停旧模式任务，防止旧控制输出与新模式初始化交叉。
+ */
+void App_Loop(void)
+{
+    Protocol_Tjc_Task();
+    App_ModeManagerTask();
+    if (g_app_switch_state == APP_SWITCH_IDLE) {
+        App_ModeTask(g_app_current_mode);
+    }
 }

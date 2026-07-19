@@ -1,16 +1,31 @@
+/**
+ * @file bsp_motor.c
+ * @brief 双路电机 PWM、H 桥状态、编码器计数和左右轮速度闭环实现。
+ *
+ * 本模块统一修正逻辑左右轮与物理接线方向；编码器 ISR 只累计位置，速度和控制计算在主循环完成。
+ */
 #include "bsp_motor.h"
 
 #include <stdint.h>
 #include "ti_msp_dl_config.h"
 
+/* PWM 周期和应用允许的最大比例指令；保留余量用于实车调试安全。 */
 #define BSP_MOTOR_PWM_PERIOD 10000U
 #define BSP_MOTOR_MAX_RATIO  0.80f
+/*
+ * 逻辑轮到物理接线的方向和正反向修正系数。
+ * 正逻辑指令必须让对应物理轮前进；左右修正值跟随电机本体，而不是连接器位置。
+ */
 #define BSP_MOTOR_LEFT_DIR    1.0f // Positive logical command must drive the physical-left wheel forward.
 #define BSP_MOTOR_RIGHT_DIR   1.0f // Positive logical command must drive the physical-right wheel forward.
 #define BSP_MOTOR_LEFT_FORWARD_SCALE  1.00f // Keep the physical-left motor trim with that motor after the connector swap.
 #define BSP_MOTOR_RIGHT_FORWARD_SCALE 0.85f // Keep the physical-right motor trim with that motor after the connector swap.
 #define BSP_MOTOR_LEFT_REVERSE_SCALE  1.00f // Physical-left reverse trim.
 #define BSP_MOTOR_RIGHT_REVERSE_SCALE 0.91f // Physical-right reverse trim.
+/*
+ * 编码器换算参数：轮径 6.5 cm，每圈 14000 个 A 相硬件边沿，定时器每 10 个边沿产生一次软件计数。
+ * 应用以 20 ms 采样，TICK_TO_CM_S 将窗口内软件计数直接换算为轮缘线速度。
+ */
 #define BSP_MOTOR_ENCODER_WHEEL_DIAMETER_CM 6.5f // Same 65 mm wheel diameter used by the 2025 and STM32 projects.
 #define BSP_MOTOR_ENCODER_EDGES_PER_REV 14000.0f // A-phase edges per wheel revolution from the 2025 GMR motor definition.
 #define BSP_MOTOR_ENCODER_EDGE_BATCH 10.0f // Match the 2025 same-car edge counter: one software count per ten A-phase edges.
@@ -18,6 +33,11 @@
 #define BSP_MOTOR_ENCODER_TICK_TO_CM_S \
     ((3.14159265f * BSP_MOTOR_ENCODER_WHEEL_DIAMETER_CM * BSP_MOTOR_ENCODER_EDGE_BATCH) / \
      (BSP_MOTOR_ENCODER_EDGES_PER_REV * BSP_MOTOR_SPEED_SAMPLE_SECONDS))
+/*
+ * 轮速闭环调参。
+ * 目标先限幅并按步长逼近；测量值可滤波；控制器包含 P/I/D 项、条件积分、启动 kick 和输出限幅。
+ * stall 计数仅设置实时故障位，不会在底层突然制动，安全策略由应用层决定。
+ */
 #define BSP_MOTOR_SPEED_TARGET_LIMIT_CM_S 60.0f // Reject accidental targets outside the first-stage test envelope.
 #define BSP_MOTOR_SPEED_TARGET_SLEW_CM_S 60.0f // Follow CCD wheel targets in one update; the verified CCD and PWM slew limits provide smoothing.
 #define BSP_MOTOR_SPEED_FILTER_ALPHA 1.00f // Match the 2025 same-car controller: use each measured window directly.
@@ -38,6 +58,7 @@
 #define BSP_MOTOR_SPEED_STALL_MIN_PWM 0.18f // Start stall timing only after enough PWM should move a lifted wheel.
 #define BSP_MOTOR_SPEED_STALL_WINDOWS 25U // Stop after 500 ms with commanded motion but no encoder batches.
 
+/* 单个逻辑轮的速度控制状态，所有速度字段单位为 cm/s，command/P/I 为 PWM 比例贡献。 */
 typedef struct {
     float requested_target; // Requested wheel speed in cm/s before the acceleration ramp.
     float target; // Slew-limited wheel speed target in cm/s used by this update.
@@ -52,6 +73,10 @@ typedef struct {
     uint8_t fault; // Live diagnostic flag; one means encoder batches disappeared under drive.
 } MotorSpeedPid;
 
+/*
+ * 编码器 ISR 累计位置和主循环采样基线。
+ * volatile 只用于中断共享；逻辑左右映射已经按当前六线电机接口修正。
+ */
 static volatile int32_t s_encoder_old_left_count = 0; // Raw old-left encoder position from PB13/PB20.
 static volatile int32_t s_encoder_old_right_count = 0; // Raw old-right encoder position from PB15/PB17.
 static int32_t s_encoder_left_last_count = 0; // Previous logical-left count used to form sample speed.
@@ -126,6 +151,7 @@ static float Motor_ApproachCommand(float value, float target)
     return Motor_Approach(value, target, step);
 }
 
+/* 清除单轮目标、测量、积分、输出和故障监督，使下一次闭环运行不继承旧模式状态。 */
 static void Motor_SpeedPidResetOne(MotorSpeedPid *pid)
 {
     pid->requested_target = 0.0f; // Clear external target so reset always returns to a stopped state.
@@ -141,6 +167,10 @@ static void Motor_SpeedPidResetOne(MotorSpeedPid *pid)
     pid->fault = 0U; // A deliberate reset clears the latched encoder fault.
 }
 
+/*
+ * 限制外部目标并处理停止/换向：清除旧方向积分和微分历史；
+ * 从静止进入较高目标时仅预置一次启动 kick，弯道内侧的低速目标不会触发 kick。
+ */
 static void Motor_SpeedPidSetTargetOne(MotorSpeedPid *pid, float target)
 {
     float previous_target = pid->requested_target;
@@ -165,6 +195,14 @@ static void Motor_SpeedPidSetTargetOne(MotorSpeedPid *pid, float target)
     pid->requested_target = target;
 }
 
+/*
+ * 单轮 20 ms 速度控制步骤：
+ * 1. 目标按斜率逼近并把编码器窗口计数换算为速度；
+ * 2. 零目标逐步撤销输出并清除控制历史；
+ * 3. 非零目标计算 P/I/D，积分仅在误差窗口内且不会推动输出继续饱和时更新；
+ * 4. 必要时施加一次静摩擦启动 kick，之后平滑逼近控制输出；
+ * 5. 在目标和 PWM 足够大但连续无编码器计数时设置实时故障位。
+ */
 static float Motor_SpeedPidStep(MotorSpeedPid *pid, int16_t encoder_ticks)
 {
     float raw_measured;
@@ -249,6 +287,10 @@ static float Motor_SpeedPidStep(MotorSpeedPid *pid, int16_t encoder_ticks)
     return pid->command;
 }
 
+/*
+ * 把一个逻辑比例映射为方向引脚和定时器 compare。
+ * 负方向使用互补占空比表达，调用前先限制到允许比例范围。
+ */
 static void Motor_SetOne(float ratio, uint32_t dir_pin, DL_TIMER_CC_INDEX compare_index)
 {
     uint32_t compare;
@@ -286,6 +328,7 @@ void Bsp_Motor_Init(void)
     DL_GPIO_enableOutput(GPIO_PWM_DC_C1_PORT, GPIO_PWM_DC_C1_PIN); // 仅电机模式恢复定时器 PWM 复用，定时器仍保持停止。
 }
 
+/* 停止 PWM 计数器并清空方向输出，使驱动桥长期保持空闲；不同于主动制动。 */
 void Bsp_Motor_Disable(void)
 {
     DL_TimerG_stopCounter(PWM_DC_INST); // 先停止定时器，避免切换引脚复用时产生新的 PWM 边沿。
@@ -301,6 +344,7 @@ void Bsp_Motor_Disable(void)
     DL_GPIO_enableOutput(GPIO_PWM_DC_C1_PORT, GPIO_PWM_DC_C1_PIN); // 停用模式下将 PA12/PA13 固定为 GPIO 低电平，不能保留外设锁存状态。
 }
 
+/* 主动制动：保持 PWM 受控并让两路 H 桥输入进入短路制动组合。 */
 void Bsp_Motor_Stop(void)
 {
     DL_TimerG_startCounter(PWM_DC_INST); // Keep PWM running so the output level is controlled.
@@ -309,6 +353,7 @@ void Bsp_Motor_Stop(void)
     DL_GPIO_setPins(GPIO_DC_PORT, GPIO_DC_AIN0_PIN | GPIO_DC_AIN2_PIN); // Both H-bridge inputs high should short-brake the motors.
 }
 
+/* 滑行：保持输出时序有效，但将桥输入置为不主动驱动的组合。 */
 void Bsp_Motor_Coast(void)
 {
     DL_TimerG_startCounter(PWM_DC_INST); // Keep PWM running so the output level is controlled.
@@ -360,6 +405,7 @@ void Bsp_Motor_SetRightRaw(uint8_t dir_high, uint32_t compare)
     DL_Timer_setCaptureCompareValue(PWM_DC_INST, compare, GPIO_PWM_DC_C1_IDX); // Logical right raw follows the corrected physical-right channel.
 }
 
+/* 启动左右编码器硬件计数器及中断；每 10 个 A 相边沿进入一次 ISR。 */
 void Bsp_Motor_EncoderInit(void)
 {
     Bsp_Motor_EncoderReset();
@@ -369,6 +415,7 @@ void Bsp_Motor_EncoderInit(void)
     DL_TimerG_startCounter(COMPARE_1_INST);
 }
 
+/* 原子清零 ISR 累计位置，并同步清除主循环采样基线和窗口速度。 */
 void Bsp_Motor_EncoderReset(void)
 {
     __disable_irq();
@@ -381,6 +428,7 @@ void Bsp_Motor_EncoderReset(void)
     s_encoder_right_speed = 0; // Reset logical-right sample speed.
 }
 
+/* 短暂关中断读取一致的累计计数，并计算相对上次采样的有符号 tick 增量。 */
 void Bsp_Motor_EncoderSample(void)
 {
     int32_t left_count;
@@ -513,6 +561,10 @@ uint32_t Bsp_Motor_GetSpeedFaults(void)
            (((uint32_t) s_right_speed_pid.fault) << 1U); // Bit 0 left, bit 1 right.
 }
 
+/*
+ * 左轮编码器 ISR：硬件累计一批 A 相边沿后触发，读取 B 相判断方向并更新软件位置。
+ * ISR 不计算速度、不打印日志，窗口速度由 Bsp_Motor_EncoderSample() 在主循环计算。
+ */
 void COMPARE_0_INST_IRQHandler(void)
 {
     if (DL_TimerG_getPendingInterrupt(COMPARE_0_INST) == DL_TIMERG_IIDX_LOAD) {
@@ -524,6 +576,7 @@ void COMPARE_0_INST_IRQHandler(void)
     }
 }
 
+/* 右轮编码器 ISR，与左轮采用相同的批量 A 相计数和 B 相方向判定。 */
 void COMPARE_1_INST_IRQHandler(void)
 {
     if (DL_TimerG_getPendingInterrupt(COMPARE_1_INST) == DL_TIMERG_IIDX_LOAD) {

@@ -1,17 +1,22 @@
+/**
+ * @file bsp_ptz.h
+ * @brief 双轴云台的定时器比较值、安全范围和控制接口。
+ */
 #ifndef BSP_PTZ_H
 #define BSP_PTZ_H
 
 #include <stdint.h>
 
+/* PWM 周期及当前实物校准得到的 Tilt/Pan 中位和软件机械安全范围，单位为定时器 compare。 */
 #define BSP_PTZ_PWM_PERIOD 10000U
 
 #define BSP_PTZ_TILT_CENTER 750U
 #define BSP_PTZ_TILT_MIN 400U
 #define BSP_PTZ_TILT_MAX 1075U
 
-#define BSP_PTZ_PAN_CENTER 770U //770U
-#define BSP_PTZ_PAN_MIN 270U //270U
-#define BSP_PTZ_PAN_MAX 1270U //1270U
+#define BSP_PTZ_PAN_CENTER 770U
+#define BSP_PTZ_PAN_MIN 270U
+#define BSP_PTZ_PAN_MAX 1270U
 
 /**
  * 初始化双轴云台并写入中心位置，但不启动 PWM。
