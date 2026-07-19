@@ -12,6 +12,8 @@
 
 /** 初始化 CCD SI/CLK 空闲电平，并使 ADC 可接受软件触发。 */
 void Bsp_Ccd_Init(void);
+/** 清除帧缓冲、边沿结果和最近有效目标，防止模式重入继承旧巡线状态。 */
+void Bsp_Ccd_ResetState(void);
 /** 按 CCD 时序采集一帧 128 像素原始 ADC 数据。 */
 void Bsp_Ccd_ReadFrame(void);
 /** 对最近原始帧进行滤波、边沿配对和中心误差计算。 */

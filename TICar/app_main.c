@@ -1187,6 +1187,7 @@ static uint8_t App_ModeEnter(uint8_t mode)
             return 1U;
         case APP_MODE_LINE_FOLLOW:
             App_EnsureCcd();
+            Bsp_Ccd_ResetState(); // 模式重入时丢弃其他 CCD 模式留下的目标和帧历史。
             App_EnsureSpeedPid();
             Bsp_Motor_SpeedPidReset();
             Bsp_Motor_EncoderReset();
@@ -1194,6 +1195,7 @@ static uint8_t App_ModeEnter(uint8_t mode)
             return 1U;
         case APP_MODE_CCD_STRAIGHT:
             App_EnsureCcd();
+            Bsp_Ccd_ResetState(); // 直行判断必须从新帧开始，不能沿用最近有效黑线。
             App_ResetLineState();
             return 1U;
         case APP_MODE_ENCODER_WATCH:
@@ -1209,6 +1211,7 @@ static uint8_t App_ModeEnter(uint8_t mode)
             return 1U;
         case APP_MODE_CIRCLE_FOLLOW:
             App_EnsureCcd();
+            Bsp_Ccd_ResetState(); // 圆形巡线重新建立当前赛道的有效中心和边沿。
             App_EnsureSpeedPid();
             Bsp_Motor_SpeedPidReset();
             Bsp_Motor_EncoderReset();
@@ -1233,6 +1236,7 @@ static uint8_t App_ModeEnter(uint8_t mode)
             return 1U;
         case APP_MODE_SQUARE_FOLLOW:
             App_EnsureCcd();
+            Bsp_Ccd_ResetState(); // 清除历史目标，防止弱边沿帧误触发直角制动和找线。
             App_EnsureSpeedPid();
             Bsp_Motor_SpeedPidReset();
             Bsp_Motor_EncoderReset();

@@ -183,6 +183,40 @@ void Bsp_Ccd_Init(void)
 }
 
 /*
+ * 清除全部采集和识别历史，使新的巡线模式只能依据进入后的新帧建立目标。
+ * raw、filtered 和 dx 同步清零，避免 CCS Watch 继续显示上一个模式遗留的数据。
+ */
+void Bsp_Ccd_ResetState(void)
+{
+    uint16_t i;
+
+    for (i = 0U; i < BSP_CCD_PIXEL_COUNT; i++) {
+        g_ccd_raw[i] = 0U;
+        g_ccd_filtered[i] = 0U;
+        g_ccd_dx[i] = 0;
+    }
+
+    g_ccd_target_index = -1;
+    g_ccd_line_error = 0;
+    g_ccd_dx_max = 0;
+    g_ccd_dx_min = 0;
+    g_ccd_dx_max_index = 0U;
+    g_ccd_dx_min_index = 0U;
+    g_ccd_line_valid = 0U;
+    g_ccd_raw_min = 0U;
+    g_ccd_raw_max = 0U;
+    g_ccd_threshold = 0U;
+    g_ccd_black_left = -1;
+    g_ccd_black_right = -1;
+    g_ccd_contrast = 0U;
+    g_ccd_black_width = 0U;
+    g_ccd_raw_min_index = 0U;
+    g_ccd_raw_max_index = 0U;
+    g_ccd_last_valid_target = BSP_CCD_CENTER_INDEX;
+    g_ccd_has_last_valid_target = 0U;
+}
+
+/*
  * 采集一帧：先清空旧像素并等待短积分时间，再产生 SI/CLK 启动序列；
  * 每个像素在移位前采样，完成 128 次采样后补第 129 个脉冲结束本行输出。
  */
