@@ -5,6 +5,7 @@
 #include "bsp_gpio.h"
 #include "bsp_motor.h"
 #include "bsp_ptz.h"
+#include "bsp_time.h"
 #include "bsp_uart.h"
 #include "pid.h"
 #include "protocol_k230.h"
@@ -124,14 +125,30 @@
 #define APP_SPEED_TEST_WARMUP_LOOPS 250U // Hold zero PWM for five seconds so the stationary phase is obvious.
 #define APP_SPEED_TEST_HOLD_LOOPS 250U // Hold each 2025-style speed target for five seconds.
 #define APP_SPEED_TEST_LOOP_DELAY (CPUCLK_FREQ / 50U) // Run speed PID around 50 Hz like the line-follow loop.
-#define APP_K230_FOLLOW_KP_NUM 8 // Integer P numerator: 8 / 100 = 0.08 compare per pixel.
-#define APP_K230_FOLLOW_KP_DEN 100
-#define APP_K230_FOLLOW_X_DEADBAND 10 // Ignore small horizontal target jitter around the image center.
-#define APP_K230_FOLLOW_Y_DEADBAND 8 // Ignore small vertical target jitter around the image center.
-#define APP_K230_FOLLOW_PAN_MAX_STEP 20 // Limit Pan movement produced by one new K230 frame.
-#define APP_K230_FOLLOW_TILT_MAX_STEP 15 // Limit Tilt movement produced by one new K230 frame.
-#define APP_K230_FOLLOW_PAN_DIRECTION (-1) // Positive error_x initially commands a lower Pan compare.
-#define APP_K230_FOLLOW_TILT_DIRECTION 1 // Positive error_y initially commands a higher Tilt compare.
+/* K230 云台 PID 调参区：两轴参数均使用“分子 / 分母”的定点数形式。 */
+#define APP_K230_FOLLOW_PAN_KP_NUM 8 // Pan Kp：8 / 100 = 0.08 compare/pixel。
+#define APP_K230_FOLLOW_PAN_KP_DEN 100
+#define APP_K230_FOLLOW_PAN_KI_NUM 0 // Pan Ki 暂时关闭，后续可直接修改分子启用积分。
+#define APP_K230_FOLLOW_PAN_KI_DEN 100
+#define APP_K230_FOLLOW_PAN_KD_NUM 4 // Pan Kd：4 / 100，抑制误差快速变化造成的过冲。
+#define APP_K230_FOLLOW_PAN_KD_DEN 100
+#define APP_K230_FOLLOW_PAN_INTEGRAL_LIMIT 1000 // Pan 积分累计限制，单位为像素·帧。
+
+#define APP_K230_FOLLOW_TILT_KP_NUM 8 // Tilt Kp：8 / 100 = 0.08 compare/pixel。
+#define APP_K230_FOLLOW_TILT_KP_DEN 100
+#define APP_K230_FOLLOW_TILT_KI_NUM 0 // Tilt Ki 暂时关闭，后续可直接修改分子启用积分。
+#define APP_K230_FOLLOW_TILT_KI_DEN 100
+#define APP_K230_FOLLOW_TILT_KD_NUM 4 // Tilt Kd：4 / 100，抑制误差快速变化造成的过冲。
+#define APP_K230_FOLLOW_TILT_KD_DEN 100
+#define APP_K230_FOLLOW_TILT_INTEGRAL_LIMIT 1000 // Tilt 积分累计限制，单位为像素·帧。
+
+#define APP_K230_FOLLOW_X_DEADBAND 10 // 水平误差绝对值不超过 10 像素时 Pan 保持不动。
+#define APP_K230_FOLLOW_Y_DEADBAND 8 // 垂直误差绝对值不超过 8 像素时 Tilt 保持不动。
+#define APP_K230_FOLLOW_PAN_MAX_STEP 20 // 每个新目标帧最多改变 20 个 Pan compare，减小单帧角度跳变。
+#define APP_K230_FOLLOW_TILT_MAX_STEP 15 // 每个新目标帧最多改变 15 个 Tilt compare，减小单帧角度跳变。
+#define APP_K230_FOLLOW_PAN_DIRECTION (-1) // 正 error_x 使 Pan compare 减小。
+#define APP_K230_FOLLOW_TILT_DIRECTION 1 // 正 error_y 时减小 Tilt compare，使云台向下追踪并形成负反馈。
+#define APP_K230_FOLLOW_STARTUP_HOLD_MS 2000U // 上电后两秒内保持双轴初始化位置。
 #define APP_K230_FOLLOW_STATE_WAIT_LINK 0U
 #define APP_K230_FOLLOW_STATE_TRACKING 1U
 #define APP_K230_FOLLOW_STATE_HOLD 2U
@@ -141,10 +158,23 @@ volatile uint32_t g_app_debug_mode = 0U; // Watch this value to confirm the runn
 
 #if APP_MODE == APP_MODE_K230_FOLLOW
 static uint32_t g_k230_follow_seen_timeout_count;
+static uint32_t g_k230_follow_start_ms;
 volatile int16_t g_k230_control_error_x = 0; // Watch the horizontal error after validity and deadband filtering.
 volatile int16_t g_k230_control_error_y = 0; // Watch the vertical error after validity and deadband filtering.
 volatile int16_t g_k230_pan_delta = 0; // Watch the actual Pan compare change applied for the latest valid target frame.
 volatile int16_t g_k230_tilt_delta = 0; // Watch the actual Tilt compare change applied for the latest valid target frame.
+volatile int32_t g_k230_pan_p_term = 0; // Watch Pan PID proportional contribution before direction correction.
+volatile int32_t g_k230_pan_i_term = 0; // Watch Pan PID integral contribution before direction correction.
+volatile int32_t g_k230_pan_d_term = 0; // Watch Pan PID derivative contribution before direction correction.
+volatile int32_t g_k230_tilt_p_term = 0; // Watch Tilt PID proportional contribution before direction correction.
+volatile int32_t g_k230_tilt_i_term = 0; // Watch Tilt PID integral contribution before direction correction.
+volatile int32_t g_k230_tilt_d_term = 0; // Watch Tilt PID derivative contribution before direction correction.
+volatile int32_t g_k230_pan_integral = 0; // Watch the limited Pan integral accumulator in pixel-frames.
+volatile int32_t g_k230_tilt_integral = 0; // Watch the limited Tilt integral accumulator in pixel-frames.
+volatile int16_t g_k230_pan_previous_error = 0; // Previous filtered Pan error used by the derivative term.
+volatile int16_t g_k230_tilt_previous_error = 0; // Previous filtered Tilt error used by the derivative term.
+static uint8_t g_k230_pan_previous_error_valid;
+static uint8_t g_k230_tilt_previous_error_valid;
 volatile uint16_t g_k230_pan_compare = BSP_PTZ_PAN_CENTER; // Watch the current Pan command sent to the BSP.
 volatile uint16_t g_k230_tilt_compare = BSP_PTZ_TILT_CENTER; // Watch the current Tilt command sent to the BSP.
 volatile uint8_t g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK; // 0 wait, 1 tracking, 2 hold, 3 timeout-disabled.
@@ -400,19 +430,115 @@ static int16_t App_K230Follow_FilterError(int16_t error, int16_t deadband)
     return error;
 }
 
-static int16_t App_K230Follow_CalculateDelta(
+static int32_t App_K230Follow_ScaleRound(
+    int32_t value,
+    int16_t numerator,
+    int16_t denominator)
+{
+    int32_t absolute_value;
+    int32_t scaled_value;
+
+    if ((value == 0) || (numerator == 0)) {
+        return 0;
+    }
+
+    absolute_value = (value < 0) ? -value : value;
+    scaled_value =
+        ((absolute_value * numerator) + (denominator / 2)) /
+        denominator;
+    return (value < 0) ? -scaled_value : scaled_value;
+}
+
+static void App_K230Follow_ResetPidAxis(
+    volatile int32_t *integral,
+    volatile int16_t *previous_error,
+    uint8_t *previous_error_valid,
+    volatile int32_t *p_term,
+    volatile int32_t *i_term,
+    volatile int32_t *d_term)
+{
+    *integral = 0;
+    *previous_error = 0;
+    *previous_error_valid = 0U;
+    *p_term = 0;
+    *i_term = 0;
+    *d_term = 0;
+}
+
+static void App_K230Follow_ResetPidState(void)
+{
+    App_K230Follow_ResetPidAxis(
+        &g_k230_pan_integral,
+        &g_k230_pan_previous_error,
+        &g_k230_pan_previous_error_valid,
+        &g_k230_pan_p_term,
+        &g_k230_pan_i_term,
+        &g_k230_pan_d_term);
+    App_K230Follow_ResetPidAxis(
+        &g_k230_tilt_integral,
+        &g_k230_tilt_previous_error,
+        &g_k230_tilt_previous_error_valid,
+        &g_k230_tilt_p_term,
+        &g_k230_tilt_i_term,
+        &g_k230_tilt_d_term);
+}
+
+static int16_t App_K230Follow_CalculatePidDelta(
     int16_t error,
     int8_t direction,
-    int16_t max_step)
+    int16_t kp_num,
+    int16_t kp_den,
+    int16_t ki_num,
+    int16_t ki_den,
+    int16_t kd_num,
+    int16_t kd_den,
+    int32_t integral_limit,
+    int16_t max_step,
+    volatile int32_t *integral,
+    volatile int16_t *previous_error,
+    uint8_t *previous_error_valid,
+    volatile int32_t *p_term,
+    volatile int32_t *i_term,
+    volatile int32_t *d_term)
 {
-    int32_t absolute_error = (error < 0) ? -(int32_t) error : (int32_t) error;
-    int32_t magnitude = ((absolute_error * APP_K230_FOLLOW_KP_NUM) +
-                         (APP_K230_FOLLOW_KP_DEN / 2)) /
-                        APP_K230_FOLLOW_KP_DEN;
-    int32_t delta = (error < 0) ? -magnitude : magnitude;
+    int32_t derivative_error = 0;
+    int32_t delta;
 
-    delta *= direction;
-    delta = App_K230Follow_LimitInt32(delta, -max_step, max_step);
+    /* 进入死区后清除该轴历史状态，避免积分残留和下一帧微分突变。 */
+    if (error == 0) {
+        App_K230Follow_ResetPidAxis(
+            integral,
+            previous_error,
+            previous_error_valid,
+            p_term,
+            i_term,
+            d_term);
+        return 0;
+    }
+
+    *integral = App_K230Follow_LimitInt32(
+        *integral + error,
+        -integral_limit,
+        integral_limit);
+
+    if (*previous_error_valid != 0U) {
+        derivative_error = (int32_t) error - *previous_error;
+    }
+    *previous_error = error;
+    *previous_error_valid = 1U;
+
+    *p_term = App_K230Follow_ScaleRound(error, kp_num, kp_den);
+    *i_term = App_K230Follow_ScaleRound(*integral, ki_num, ki_den);
+    *d_term = App_K230Follow_ScaleRound(
+        derivative_error,
+        kd_num,
+        kd_den);
+
+    delta = (*p_term + *i_term + *d_term) * direction;
+    delta = App_K230Follow_LimitInt32(
+        delta,
+        -max_step,
+        max_step); // PID 合成后先限制单帧变化，再累加到当前舵机位置。
     return (int16_t) delta;
 }
 
@@ -431,22 +557,49 @@ static void App_K230Follow_ProcessFrame(const K230_TargetFrame *frame)
         g_k230_control_error_y = 0;
         g_k230_pan_delta = 0;
         g_k230_tilt_delta = 0;
+        App_K230Follow_ResetPidState();
         g_k230_follow_state = APP_K230_FOLLOW_STATE_HOLD;
-        return; // A valid N or low-confidence T frame holds the last safe position.
+        return; // 无目标或低置信度时保持当前位置，并清除 PID 历史状态。
     }
 
     g_k230_control_error_x = App_K230Follow_FilterError(
         frame->error_x, APP_K230_FOLLOW_X_DEADBAND);
     g_k230_control_error_y = App_K230Follow_FilterError(
         frame->error_y, APP_K230_FOLLOW_Y_DEADBAND);
-    requested_pan_delta = App_K230Follow_CalculateDelta(
+    requested_pan_delta = App_K230Follow_CalculatePidDelta(
         g_k230_control_error_x,
         APP_K230_FOLLOW_PAN_DIRECTION,
-        APP_K230_FOLLOW_PAN_MAX_STEP);
-    requested_tilt_delta = App_K230Follow_CalculateDelta(
+        APP_K230_FOLLOW_PAN_KP_NUM,
+        APP_K230_FOLLOW_PAN_KP_DEN,
+        APP_K230_FOLLOW_PAN_KI_NUM,
+        APP_K230_FOLLOW_PAN_KI_DEN,
+        APP_K230_FOLLOW_PAN_KD_NUM,
+        APP_K230_FOLLOW_PAN_KD_DEN,
+        APP_K230_FOLLOW_PAN_INTEGRAL_LIMIT,
+        APP_K230_FOLLOW_PAN_MAX_STEP,
+        &g_k230_pan_integral,
+        &g_k230_pan_previous_error,
+        &g_k230_pan_previous_error_valid,
+        &g_k230_pan_p_term,
+        &g_k230_pan_i_term,
+        &g_k230_pan_d_term);
+    requested_tilt_delta = App_K230Follow_CalculatePidDelta(
         g_k230_control_error_y,
         APP_K230_FOLLOW_TILT_DIRECTION,
-        APP_K230_FOLLOW_TILT_MAX_STEP);
+        APP_K230_FOLLOW_TILT_KP_NUM,
+        APP_K230_FOLLOW_TILT_KP_DEN,
+        APP_K230_FOLLOW_TILT_KI_NUM,
+        APP_K230_FOLLOW_TILT_KI_DEN,
+        APP_K230_FOLLOW_TILT_KD_NUM,
+        APP_K230_FOLLOW_TILT_KD_DEN,
+        APP_K230_FOLLOW_TILT_INTEGRAL_LIMIT,
+        APP_K230_FOLLOW_TILT_MAX_STEP,
+        &g_k230_tilt_integral,
+        &g_k230_tilt_previous_error,
+        &g_k230_tilt_previous_error_valid,
+        &g_k230_tilt_p_term,
+        &g_k230_tilt_i_term,
+        &g_k230_tilt_d_term);
 
     previous_pan = g_k230_pan_compare;
     previous_tilt = g_k230_tilt_compare;
@@ -472,12 +625,39 @@ static void App_K230Follow_Task(void)
 {
     K230_TargetFrame frame;
 
-    if (g_k230_timeout_count != g_k230_follow_seen_timeout_count) {
-        g_k230_follow_seen_timeout_count = g_k230_timeout_count;
+    if ((uint32_t) (Bsp_Time_GetMilliseconds() - g_k230_follow_start_ms) <
+        APP_K230_FOLLOW_STARTUP_HOLD_MS) {
+        (void) Protocol_K230_TakeLatestFrame(&frame); // 丢弃启动阶段旧帧，保持结束后只响应新目标。
+
+        /*
+         * 启动阶段持续写入中心命令，使 K230 已经通信时也必须先完成回中。
+         * 同步软件保存值，保证两秒后的第一次跟随增量从中心位置开始计算。
+         */
+        g_k230_pan_compare = BSP_PTZ_PAN_CENTER;
+        g_k230_tilt_compare = BSP_PTZ_TILT_CENTER;
+        Bsp_Ptz_SetCompare(g_k230_tilt_compare, g_k230_pan_compare);
+
+        g_k230_follow_seen_timeout_count = g_k230_timeout_count; // 启动阶段的历史超时不能在两秒后误关闭已恢复链路。
         g_k230_control_error_x = 0;
         g_k230_control_error_y = 0;
         g_k230_pan_delta = 0;
         g_k230_tilt_delta = 0;
+        App_K230Follow_ResetPidState();
+        g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK;
+        return;
+    }
+
+    if (g_k230_timeout_count != g_k230_follow_seen_timeout_count) {
+        g_k230_follow_seen_timeout_count = g_k230_timeout_count;
+    }
+    if ((g_k230_link_alive == 0U) &&
+        (g_k230_timeout_count != 0U) &&
+        (g_k230_follow_state != APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED)) {
+        g_k230_control_error_x = 0;
+        g_k230_control_error_y = 0;
+        g_k230_pan_delta = 0;
+        g_k230_tilt_delta = 0;
+        App_K230Follow_ResetPidState();
         Bsp_Ptz_Disable();
         g_k230_follow_state = APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED;
         return;
@@ -487,7 +667,13 @@ static void App_K230Follow_Task(void)
         return;
     }
     if (g_k230_follow_state == APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED) {
-        return; // Keep PWM disabled after a link timeout until the mode is restarted.
+        if (g_k230_link_alive == 0U) {
+            return;
+        }
+
+        Bsp_Ptz_Init(); // 恢复 PB4/PB1 的 PWM 复用，此时定时器仍保持停止。
+        Bsp_Ptz_SetCompare(g_k230_tilt_compare, g_k230_pan_compare); // 启动前写回超时前位置，避免恢复时突然回中。
+        Bsp_Ptz_Start();
     }
 
     App_K230Follow_ProcessFrame(&frame);
@@ -513,6 +699,7 @@ void App_Init(void)
     g_k230_control_error_y = 0;
     g_k230_pan_delta = 0;
     g_k230_tilt_delta = 0;
+    App_K230Follow_ResetPidState();
     g_k230_pan_compare = BSP_PTZ_PAN_CENTER;
     g_k230_tilt_compare = BSP_PTZ_TILT_CENTER;
     g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK;
@@ -550,6 +737,7 @@ void App_Init(void)
     Protocol_K230_Init();
 #if APP_MODE == APP_MODE_K230_FOLLOW
     g_k230_follow_seen_timeout_count = g_k230_timeout_count;
+    g_k230_follow_start_ms = Bsp_Time_GetMilliseconds();
 #endif
     PID_InitDefaults();
 }

@@ -8,6 +8,7 @@
 
 static char g_k230_line[K230_PROTOCOL_LINE_SIZE];
 static uint8_t g_k230_line_length;
+static uint8_t g_k230_discard_until_lf; // 超长行触发后丢弃剩余内容，直到收到该行的 LF。
 
 volatile K230_TargetFrame g_k230_latest_frame;
 static uint8_t g_k230_new_frame;
@@ -24,6 +25,7 @@ volatile uint32_t g_k230_timeout_count;
 void Protocol_K230_Init(void)
 {
     g_k230_line_length = 0U;
+    g_k230_discard_until_lf = 0U;
     g_k230_new_frame = 0U;
     g_k230_valid_frame_count = 0U;
     g_k230_invalid_frame_count = 0U;
@@ -161,6 +163,14 @@ void Protocol_K230_Task(void)
         
         g_k230_rx_byte_count++;
 
+        if (g_k230_discard_until_lf != 0U) {
+            if (byte == (uint8_t) '\n') {
+                g_k230_discard_until_lf = 0U;
+                g_k230_line_length = 0U;
+            }
+            continue; // 当前超长行只报错一次，行尾之前的所有剩余字节全部丢弃。
+        }
+
         if (byte == (uint8_t) '\r') {
             /*
              * K230 发送的是 CRLF，忽略 CR，等待 LF 完成一帧。
@@ -187,6 +197,7 @@ void Protocol_K230_Task(void)
              * 当前帧过长，丢弃已经收到的数据并等待下一行。
              */
             g_k230_line_length = 0U;
+            g_k230_discard_until_lf = 1U;
             g_k230_invalid_frame_count++;
             Bsp_Uart_K230_SendString("ERR,FRAME\r\n");
         }
