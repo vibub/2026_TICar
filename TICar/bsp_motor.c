@@ -318,16 +318,30 @@ static float Motor_ApplyTrim(float ratio, float dir, float forward_scale, float 
 
 void Bsp_Motor_Init(void)
 {
-    Bsp_Motor_Disable(); // Leave the bridge electrically idle until a motion command is issued.
+    Bsp_Motor_Disable(); // 先将 H 桥和两个 PWM 引脚强制拉低，避免初始化瞬间误动作。
+
+    DL_GPIO_initPeripheralOutputFunction(
+        GPIO_PWM_DC_C0_IOMUX, GPIO_PWM_DC_C0_IOMUX_FUNC);
+    DL_GPIO_enableOutput(GPIO_PWM_DC_C0_PORT, GPIO_PWM_DC_C0_PIN);
+    DL_GPIO_initPeripheralOutputFunction(
+        GPIO_PWM_DC_C1_IOMUX, GPIO_PWM_DC_C1_IOMUX_FUNC);
+    DL_GPIO_enableOutput(GPIO_PWM_DC_C1_PORT, GPIO_PWM_DC_C1_PIN); // 仅电机模式恢复定时器 PWM 复用，定时器仍保持停止。
 }
 
 /* 停止 PWM 计数器并清空方向输出，使驱动桥长期保持空闲；不同于主动制动。 */
 void Bsp_Motor_Disable(void)
 {
-    DL_TimerG_stopCounter(PWM_DC_INST); // Stop PWM so debug/CCD modes cannot accidentally drive the motors.
-    DL_Timer_setCaptureCompareValue(PWM_DC_INST, BSP_MOTOR_PWM_PERIOD, GPIO_PWM_DC_C0_IDX); // Keep PWM command at zero-drive side.
-    DL_Timer_setCaptureCompareValue(PWM_DC_INST, BSP_MOTOR_PWM_PERIOD, GPIO_PWM_DC_C1_IDX); // Keep PWM command at zero-drive side.
-    DL_GPIO_clearPins(GPIO_DC_PORT, GPIO_DC_AIN0_PIN | GPIO_DC_AIN2_PIN); // Clear direction pins so the H-bridge is idle.
+    DL_TimerG_stopCounter(PWM_DC_INST); // 先停止定时器，避免切换引脚复用时产生新的 PWM 边沿。
+    DL_Timer_setCaptureCompareValue(PWM_DC_INST, BSP_MOTOR_PWM_PERIOD, GPIO_PWM_DC_C0_IDX);
+    DL_Timer_setCaptureCompareValue(PWM_DC_INST, BSP_MOTOR_PWM_PERIOD, GPIO_PWM_DC_C1_IDX);
+    DL_GPIO_clearPins(GPIO_DC_PORT, GPIO_DC_AIN0_PIN | GPIO_DC_AIN2_PIN); // 两个方向输入先拉低，使 H 桥进入空转安全状态。
+
+    DL_GPIO_initDigitalOutput(GPIO_PWM_DC_C0_IOMUX);
+    DL_GPIO_clearPins(GPIO_PWM_DC_C0_PORT, GPIO_PWM_DC_C0_PIN);
+    DL_GPIO_enableOutput(GPIO_PWM_DC_C0_PORT, GPIO_PWM_DC_C0_PIN);
+    DL_GPIO_initDigitalOutput(GPIO_PWM_DC_C1_IOMUX);
+    DL_GPIO_clearPins(GPIO_PWM_DC_C1_PORT, GPIO_PWM_DC_C1_PIN);
+    DL_GPIO_enableOutput(GPIO_PWM_DC_C1_PORT, GPIO_PWM_DC_C1_PIN); // 停用模式下将 PA12/PA13 固定为 GPIO 低电平，不能保留外设锁存状态。
 }
 
 /* 主动制动：保持 PWM 受控并让两路 H 桥输入进入短路制动组合。 */

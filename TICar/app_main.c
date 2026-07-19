@@ -74,18 +74,31 @@
 #define APP_SPEED_TEST_HOLD_LOOPS 250U
 
 /*
- * K230 云台增量控制参数。
- * 图像误差来自 640×360 坐标系；死区抑制中心附近抖动，MAX_STEP 限制单帧 compare 增量。
- * DIRECTION 反映摄像头安装方向与 PWM compare 增减方向的对应关系。
+ * K230 云台增量 PID 参数。
+ * 图像误差来自 640×360 坐标系；两轴分别计算 P/I/D，合成后限制单帧 compare 增量。
+ * Ki 当前保持关闭，但保留积分状态和限幅，便于后续实车调参。
  */
-#define APP_K230_FOLLOW_KP_NUM 8
-#define APP_K230_FOLLOW_KP_DEN 100
+#define APP_K230_FOLLOW_PAN_KP_NUM 8
+#define APP_K230_FOLLOW_PAN_KP_DEN 100
+#define APP_K230_FOLLOW_PAN_KI_NUM 0
+#define APP_K230_FOLLOW_PAN_KI_DEN 100
+#define APP_K230_FOLLOW_PAN_KD_NUM 4
+#define APP_K230_FOLLOW_PAN_KD_DEN 100
+#define APP_K230_FOLLOW_PAN_INTEGRAL_LIMIT 1000
+#define APP_K230_FOLLOW_TILT_KP_NUM 8
+#define APP_K230_FOLLOW_TILT_KP_DEN 100
+#define APP_K230_FOLLOW_TILT_KI_NUM 0
+#define APP_K230_FOLLOW_TILT_KI_DEN 100
+#define APP_K230_FOLLOW_TILT_KD_NUM 4
+#define APP_K230_FOLLOW_TILT_KD_DEN 100
+#define APP_K230_FOLLOW_TILT_INTEGRAL_LIMIT 1000
 #define APP_K230_FOLLOW_X_DEADBAND 10
 #define APP_K230_FOLLOW_Y_DEADBAND 8
 #define APP_K230_FOLLOW_PAN_MAX_STEP 20
 #define APP_K230_FOLLOW_TILT_MAX_STEP 15
 #define APP_K230_FOLLOW_PAN_DIRECTION (-1)
 #define APP_K230_FOLLOW_TILT_DIRECTION 1
+#define APP_K230_FOLLOW_STARTUP_HOLD_MS 2000U
 #define APP_K230_FOLLOW_STATE_WAIT_LINK 0U
 #define APP_K230_FOLLOW_STATE_TRACKING 1U
 #define APP_K230_FOLLOW_STATE_HOLD 2U
@@ -201,10 +214,23 @@ static uint32_t g_uart_test_count;
  * 状态依次为等待链路、跟踪、无目标保持、链路超时后关闭 PWM。
  */
 static uint32_t g_k230_follow_seen_timeout_count;
+static uint32_t g_k230_follow_start_ms;
 volatile int16_t g_k230_control_error_x;
 volatile int16_t g_k230_control_error_y;
 volatile int16_t g_k230_pan_delta;
 volatile int16_t g_k230_tilt_delta;
+volatile int32_t g_k230_pan_p_term;
+volatile int32_t g_k230_pan_i_term;
+volatile int32_t g_k230_pan_d_term;
+volatile int32_t g_k230_tilt_p_term;
+volatile int32_t g_k230_tilt_i_term;
+volatile int32_t g_k230_tilt_d_term;
+volatile int32_t g_k230_pan_integral;
+volatile int32_t g_k230_tilt_integral;
+volatile int16_t g_k230_pan_previous_error;
+volatile int16_t g_k230_tilt_previous_error;
+static uint8_t g_k230_pan_previous_error_valid;
+static uint8_t g_k230_tilt_previous_error_valid;
 volatile uint16_t g_k230_pan_compare = BSP_PTZ_PAN_CENTER;
 volatile uint16_t g_k230_tilt_compare = BSP_PTZ_TILT_CENTER;
 volatile uint8_t g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK;
@@ -528,19 +554,104 @@ static int16_t App_K230Follow_FilterError(int16_t error, int16_t deadband)
     return ((error >= -deadband) && (error <= deadband)) ? 0 : error;
 }
 
-/*
- * 使用整数比例计算单帧 compare 增量，再按安装方向和最大步长限制输出。
- * 不直接使用浮点角度，最终安全范围仍由 BSP_PTZ_MIN/MAX 二次限制。
- */
-static int16_t App_K230Follow_CalculateDelta(int16_t error, int8_t direction, int16_t max_step)
+/* 定点比例运算采用四舍五入，并保留输入符号，避免云台 PID 引入浮点计算。 */
+static int32_t App_K230Follow_ScaleRound(
+    int32_t value,
+    int16_t numerator,
+    int16_t denominator)
 {
-    int32_t absolute_error = (error < 0) ? -(int32_t) error : (int32_t) error;
-    int32_t magnitude = ((absolute_error * APP_K230_FOLLOW_KP_NUM) +
-                         (APP_K230_FOLLOW_KP_DEN / 2)) /
-                        APP_K230_FOLLOW_KP_DEN;
-    int32_t delta = ((error < 0) ? -magnitude : magnitude) * direction;
+    int32_t absolute_value;
+    int32_t scaled_value;
 
-    return (int16_t) App_K230Follow_LimitInt32(delta, -max_step, max_step);
+    if ((value == 0) || (numerator == 0)) {
+        return 0;
+    }
+
+    absolute_value = (value < 0) ? -value : value;
+    scaled_value = ((absolute_value * numerator) + (denominator / 2)) /
+                   denominator;
+    return (value < 0) ? -scaled_value : scaled_value;
+}
+
+/* 清除单轴 PID 历史，防止死区、超时或模式重入后继承旧积分和微分状态。 */
+static void App_K230Follow_ResetPidAxis(
+    volatile int32_t *integral,
+    volatile int16_t *previous_error,
+    uint8_t *previous_error_valid,
+    volatile int32_t *p_term,
+    volatile int32_t *i_term,
+    volatile int32_t *d_term)
+{
+    *integral = 0;
+    *previous_error = 0;
+    *previous_error_valid = 0U;
+    *p_term = 0;
+    *i_term = 0;
+    *d_term = 0;
+}
+
+static void App_K230Follow_ResetPidState(void)
+{
+    App_K230Follow_ResetPidAxis(
+        &g_k230_pan_integral,
+        &g_k230_pan_previous_error,
+        &g_k230_pan_previous_error_valid,
+        &g_k230_pan_p_term,
+        &g_k230_pan_i_term,
+        &g_k230_pan_d_term);
+    App_K230Follow_ResetPidAxis(
+        &g_k230_tilt_integral,
+        &g_k230_tilt_previous_error,
+        &g_k230_tilt_previous_error_valid,
+        &g_k230_tilt_p_term,
+        &g_k230_tilt_i_term,
+        &g_k230_tilt_d_term);
+}
+
+/* 计算单轴增量 PID 输出，并在累加到舵机位置前限制本帧最大 compare 变化。 */
+static int16_t App_K230Follow_CalculatePidDelta(
+    int16_t error,
+    int8_t direction,
+    int16_t kp_num,
+    int16_t kp_den,
+    int16_t ki_num,
+    int16_t ki_den,
+    int16_t kd_num,
+    int16_t kd_den,
+    int32_t integral_limit,
+    int16_t max_step,
+    volatile int32_t *integral,
+    volatile int16_t *previous_error,
+    uint8_t *previous_error_valid,
+    volatile int32_t *p_term,
+    volatile int32_t *i_term,
+    volatile int32_t *d_term)
+{
+    int32_t derivative_error = 0;
+    int32_t delta;
+
+    if (error == 0) {
+        App_K230Follow_ResetPidAxis(
+            integral, previous_error, previous_error_valid,
+            p_term, i_term, d_term);
+        return 0;
+    }
+
+    *integral = App_K230Follow_LimitInt32(
+        *integral + error, -integral_limit, integral_limit);
+    if (*previous_error_valid != 0U) {
+        derivative_error = (int32_t) error - *previous_error;
+    }
+    *previous_error = error;
+    *previous_error_valid = 1U;
+
+    *p_term = App_K230Follow_ScaleRound(error, kp_num, kp_den);
+    *i_term = App_K230Follow_ScaleRound(*integral, ki_num, ki_den);
+    *d_term = App_K230Follow_ScaleRound(derivative_error, kd_num, kd_den);
+
+    delta = (*p_term + *i_term + *d_term) * direction;
+    delta = App_K230Follow_LimitInt32(delta, -max_step, max_step);
+    return (int16_t) delta;
 }
 
 /*
@@ -561,6 +672,7 @@ static void App_K230Follow_ProcessFrame(const K230_TargetFrame *frame)
         g_k230_control_error_y = 0;
         g_k230_pan_delta = 0;
         g_k230_tilt_delta = 0;
+        App_K230Follow_ResetPidState();
         g_k230_follow_state = APP_K230_FOLLOW_STATE_HOLD;
         return;
     }
@@ -569,12 +681,40 @@ static void App_K230Follow_ProcessFrame(const K230_TargetFrame *frame)
         frame->error_x, APP_K230_FOLLOW_X_DEADBAND);
     g_k230_control_error_y = App_K230Follow_FilterError(
         frame->error_y, APP_K230_FOLLOW_Y_DEADBAND);
-    requested_pan_delta = App_K230Follow_CalculateDelta(
-        g_k230_control_error_x, APP_K230_FOLLOW_PAN_DIRECTION,
-        APP_K230_FOLLOW_PAN_MAX_STEP);
-    requested_tilt_delta = App_K230Follow_CalculateDelta(
-        g_k230_control_error_y, APP_K230_FOLLOW_TILT_DIRECTION,
-        APP_K230_FOLLOW_TILT_MAX_STEP);
+    requested_pan_delta = App_K230Follow_CalculatePidDelta(
+        g_k230_control_error_x,
+        APP_K230_FOLLOW_PAN_DIRECTION,
+        APP_K230_FOLLOW_PAN_KP_NUM,
+        APP_K230_FOLLOW_PAN_KP_DEN,
+        APP_K230_FOLLOW_PAN_KI_NUM,
+        APP_K230_FOLLOW_PAN_KI_DEN,
+        APP_K230_FOLLOW_PAN_KD_NUM,
+        APP_K230_FOLLOW_PAN_KD_DEN,
+        APP_K230_FOLLOW_PAN_INTEGRAL_LIMIT,
+        APP_K230_FOLLOW_PAN_MAX_STEP,
+        &g_k230_pan_integral,
+        &g_k230_pan_previous_error,
+        &g_k230_pan_previous_error_valid,
+        &g_k230_pan_p_term,
+        &g_k230_pan_i_term,
+        &g_k230_pan_d_term);
+    requested_tilt_delta = App_K230Follow_CalculatePidDelta(
+        g_k230_control_error_y,
+        APP_K230_FOLLOW_TILT_DIRECTION,
+        APP_K230_FOLLOW_TILT_KP_NUM,
+        APP_K230_FOLLOW_TILT_KP_DEN,
+        APP_K230_FOLLOW_TILT_KI_NUM,
+        APP_K230_FOLLOW_TILT_KI_DEN,
+        APP_K230_FOLLOW_TILT_KD_NUM,
+        APP_K230_FOLLOW_TILT_KD_DEN,
+        APP_K230_FOLLOW_TILT_INTEGRAL_LIMIT,
+        APP_K230_FOLLOW_TILT_MAX_STEP,
+        &g_k230_tilt_integral,
+        &g_k230_tilt_previous_error,
+        &g_k230_tilt_previous_error_valid,
+        &g_k230_tilt_p_term,
+        &g_k230_tilt_i_term,
+        &g_k230_tilt_d_term);
 
     previous_pan = g_k230_pan_compare;
     previous_tilt = g_k230_tilt_compare;
@@ -595,28 +735,59 @@ static void App_K230Follow_ProcessFrame(const K230_TargetFrame *frame)
 }
 
 /*
- * 高频轮询 K230 协议并消费最新帧。检测到新的链路超时事件后立即关闭云台 PWM；
- * TIMEOUT_DISABLED 不会因普通新帧自动恢复，必须重新进入模式完成显式重启。
+ * 高频轮询 K230 协议并消费最新帧。每次进入模式先保持中心两秒；链路超时后关闭 PWM，
+ * 收到新的合法帧时恢复引脚复用和超时前位置，无需用户重新选择模式。
  */
 static void App_K230Follow_Task(void)
 {
     K230_TargetFrame frame;
 
     Protocol_K230_Task();
-    if (g_k230_timeout_count != g_k230_follow_seen_timeout_count) {
+
+    if ((uint32_t) (Bsp_Time_GetMilliseconds() - g_k230_follow_start_ms) <
+        APP_K230_FOLLOW_STARTUP_HOLD_MS) {
+        (void) Protocol_K230_TakeLatestFrame(&frame);
+        g_k230_pan_compare = BSP_PTZ_PAN_CENTER;
+        g_k230_tilt_compare = BSP_PTZ_TILT_CENTER;
+        Bsp_Ptz_SetCompare(g_k230_tilt_compare, g_k230_pan_compare);
         g_k230_follow_seen_timeout_count = g_k230_timeout_count;
         g_k230_control_error_x = 0;
         g_k230_control_error_y = 0;
         g_k230_pan_delta = 0;
         g_k230_tilt_delta = 0;
+        App_K230Follow_ResetPidState();
+        g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK;
+        return;
+    }
+
+    if (g_k230_timeout_count != g_k230_follow_seen_timeout_count) {
+        g_k230_follow_seen_timeout_count = g_k230_timeout_count;
+    }
+    if ((g_k230_link_alive == 0U) &&
+        (g_k230_timeout_count != 0U) &&
+        (g_k230_follow_state != APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED)) {
+        g_k230_control_error_x = 0;
+        g_k230_control_error_y = 0;
+        g_k230_pan_delta = 0;
+        g_k230_tilt_delta = 0;
+        App_K230Follow_ResetPidState();
         Bsp_Ptz_Disable();
         g_k230_follow_state = APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED;
         return;
     }
 
-    if ((Protocol_K230_TakeLatestFrame(&frame) == 0U) ||
-        (g_k230_follow_state == APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED)) {
+    if (Protocol_K230_TakeLatestFrame(&frame) == 0U) {
         return;
+    }
+
+    if (g_k230_follow_state == APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED) {
+        if (g_k230_link_alive == 0U) {
+            return;
+        }
+
+        Bsp_Ptz_Init();
+        Bsp_Ptz_SetCompare(g_k230_tilt_compare, g_k230_pan_compare);
+        Bsp_Ptz_Start();
     }
 
     App_K230Follow_ProcessFrame(&frame);
@@ -962,6 +1133,11 @@ static void App_ModeExit(uint8_t mode)
     }
 
     if (mode == APP_MODE_K230_FOLLOW) {
+        g_k230_control_error_x = 0;
+        g_k230_control_error_y = 0;
+        g_k230_pan_delta = 0;
+        g_k230_tilt_delta = 0;
+        App_K230Follow_ResetPidState();
         Bsp_Ptz_Disable();
     }
 }
@@ -979,6 +1155,11 @@ static uint8_t App_ModeEnter(uint8_t mode)
 
     g_mode_last_task_ms = now_ms - APP_LOOP_SLOW_MS;
     Bsp_Gpio_SetHeartbeat(0U);
+
+    /* 电机停用态会把 PA12/PA13 切为 GPIO 低电平，进入运动模式前必须恢复 PWM 复用。 */
+    if (App_ModeUsesMotor(mode) != 0U) {
+        Bsp_Motor_Init();
+    }
 
     switch (mode) {
         case APP_MODE_STOPPED:
@@ -1036,16 +1217,19 @@ static uint8_t App_ModeEnter(uint8_t mode)
         case APP_MODE_K230_FOLLOW:
             Protocol_K230_Init();
             Bsp_Ptz_Init();
-            Bsp_Ptz_Start();
             g_k230_control_error_x = 0;
             g_k230_control_error_y = 0;
             g_k230_pan_delta = 0;
             g_k230_tilt_delta = 0;
+            App_K230Follow_ResetPidState();
             g_k230_pan_compare = BSP_PTZ_PAN_CENTER;
             g_k230_tilt_compare = BSP_PTZ_TILT_CENTER;
+            Bsp_Ptz_SetCompare(g_k230_tilt_compare, g_k230_pan_compare);
+            Bsp_Ptz_Start();
             g_k230_follow_state = APP_K230_FOLLOW_STATE_WAIT_LINK;
             g_k230_follow_update_count = 0U;
             g_k230_follow_seen_timeout_count = g_k230_timeout_count;
+            g_k230_follow_start_ms = now_ms;
             return 1U;
         case APP_MODE_SQUARE_FOLLOW:
             App_EnsureCcd();
@@ -1137,7 +1321,7 @@ static void App_ModeTask(uint8_t mode)
             App_FollowTask(&g_circle_follow_profile, 0U);
             break;
         case APP_MODE_K230_FOLLOW:
-            /* 解析 K230 目标并增量更新双轴云台，链路超时后禁用 PWM。 */
+            /* 解析 K230 目标并增量更新双轴云台，链路超时后禁用并在新帧到达时恢复 PWM。 */
             App_K230Follow_Task();
             break;
         case APP_MODE_SQUARE_FOLLOW:
