@@ -60,9 +60,15 @@
 #define APP_SQUARE_LOST_RECOVER_MAX 14U
 #define APP_SQUARE_LOST_SPEED_SCALE 0.45f
 #define APP_SQUARE_LOST_TURN 0.060f
+#define APP_SQUARE_CORNER_STATE_TRACK 0U
+#define APP_SQUARE_CORNER_STATE_BRAKE 1U
+#define APP_SQUARE_CORNER_STATE_PIVOT 2U
+#define APP_SQUARE_CORNER_STATE_FAULT 3U
+#define APP_SQUARE_CORNER_ARM_LOOPS 5U
 #define APP_SQUARE_CORNER_ENTER_ERROR 32
-#define APP_SQUARE_CORNER_EXIT_ERROR 5
-#define APP_SQUARE_CORNER_MISSING_LOOPS 3U
+#define APP_SQUARE_CORNER_REACQUIRE_ERROR 8
+#define APP_SQUARE_CORNER_MISSING_LOOPS 6U
+#define APP_SQUARE_CORNER_REACQUIRE_LOOPS 3U
 #define APP_SQUARE_CORNER_BRAKE_LOOPS 5U
 #define APP_SQUARE_CORNER_MAX_PIVOT_LOOPS 90U
 #define APP_SQUARE_CORNER_PIVOT_SPEED 0.16f
@@ -313,16 +319,19 @@ static int16_t g_line_last_error;
 static float g_line_last_correction;
 
 /*
- * 方形直角状态：0 正常巡线、1 主动制动等待、2 原地转向找线。
+ * 方形直角状态：正常巡线、主动制动、原地找线和超时停车锁存。
  * count 是当前状态内的 20 ms 循环数；direction 为 -1 左转、+1 右转。
- * seen_center_line 防止启动时误判，center_missing_count 用连续帧确认中心线确实消失。
+ * seen_center_line 表示角点检测已完成连续帧武装，其余计数用于丢线和重捕获防抖。
  */
 volatile uint8_t g_square_corner_state;
 volatile uint32_t g_square_corner_count;
 volatile int8_t g_square_corner_direction;
 volatile uint32_t g_square_corner_entry_count;
+volatile uint32_t g_square_corner_timeout_count;
 volatile uint8_t g_square_seen_center_line;
+volatile uint8_t g_square_center_stable_count;
 volatile uint8_t g_square_center_missing_count;
+volatile uint8_t g_square_reacquire_count;
 
 /*
  * 判断周期是否到期。使用 uint32_t 无符号差值可自然跨越毫秒计数回绕；到期后同步更新基准时间。
@@ -471,15 +480,18 @@ static void App_ResetLineState(void)
     g_line_last_correction = 0.0f;
 }
 
-/* 清除方形赛道角点阶段、计时和连续丢线确认，避免继承上一次直角过程。 */
+/* 清除方形赛道角点阶段、防抖计数和超时锁存，保证模式重入从未武装状态开始。 */
 static void App_ResetSquareState(void)
 {
-    g_square_corner_state = 0U;
+    g_square_corner_state = APP_SQUARE_CORNER_STATE_TRACK;
     g_square_corner_count = 0U;
     g_square_corner_direction = 0;
     g_square_corner_entry_count = 0U;
+    g_square_corner_timeout_count = 0U;
     g_square_seen_center_line = 0U;
+    g_square_center_stable_count = 0U;
     g_square_center_missing_count = 0U;
+    g_square_reacquire_count = 0U;
 }
 
 /*
@@ -795,9 +807,9 @@ static void App_K230Follow_Task(void)
 
 /*
  * 方形赛道直角状态机：
- * 正常巡线 --中心线连续缺失--> 主动制动 --等待若干周期--> 固定方向原地转向。
- * 只有检测到具有真实黑线宽度且误差接近中心的线才退出转向；最大转向周期用于防止永久卡死。
- * seen_center_line 可避免上电尚未见线时误触发，black_width==0 的弱边沿保持帧不能作为重捕获依据。
+ * 正常巡线需要连续可靠中心帧完成武装，随后连续丢线才进入主动制动和固定方向原地转向。
+ * 重捕获同样采用连续帧确认；超过最大转向周期后锁存停车，避免条件未清除时反复原地打转。
+ * black_width==0 的弱边沿桥接帧不能用于武装或重捕获，但仍可由通用巡线维持短时连续性。
  *
  * @return 1 表示本周期由角点状态机接管电机；0 表示继续执行通用巡线。
  */
@@ -809,54 +821,98 @@ static uint8_t App_SquareCornerTask(void)
     uint16_t black_width = Bsp_Ccd_GetBlackWidth();
     uint8_t center_detected = ((line_valid != 0U) && (black_width != 0U) &&
                                (abs_error < APP_SQUARE_CORNER_ENTER_ERROR)) ? 1U : 0U;
-    uint8_t center_missing = ((line_valid == 0U) || (black_width == 0U) ||
-                              (abs_error >= APP_SQUARE_CORNER_ENTER_ERROR)) ? 1U : 0U;
+    uint8_t center_reacquired = ((line_valid != 0U) && (black_width != 0U) &&
+                                 (abs_error <= APP_SQUARE_CORNER_REACQUIRE_ERROR)) ? 1U : 0U;
 
-    if (center_detected != 0U) {
-        g_square_seen_center_line = 1U;
-        g_square_center_missing_count = 0U;
-    } else if ((center_missing != 0U) &&
-               (g_square_center_missing_count < APP_SQUARE_CORNER_MISSING_LOOPS)) {
-        g_square_center_missing_count++;
-    }
+    if (g_square_corner_state == APP_SQUARE_CORNER_STATE_TRACK) {
+        if (g_square_seen_center_line == 0U) {
+            g_square_center_missing_count = 0U;
+            if (center_detected != 0U) {
+                if (g_square_center_stable_count < APP_SQUARE_CORNER_ARM_LOOPS) {
+                    g_square_center_stable_count++;
+                }
+                if (g_square_center_stable_count >= APP_SQUARE_CORNER_ARM_LOOPS) {
+                    g_square_seen_center_line = 1U;
+                }
+            } else {
+                g_square_center_stable_count = 0U;
+            }
+            return 0U;
+        }
 
-    if ((g_square_corner_state == 0U) && (g_square_seen_center_line != 0U) &&
-        (g_square_center_missing_count >= APP_SQUARE_CORNER_MISSING_LOOPS)) {
-        g_square_corner_state = 1U;
+        if (center_detected != 0U) {
+            g_square_center_missing_count = 0U;
+        } else if (g_square_center_missing_count < APP_SQUARE_CORNER_MISSING_LOOPS) {
+            g_square_center_missing_count++;
+        }
+
+        if (g_square_center_missing_count < APP_SQUARE_CORNER_MISSING_LOOPS) {
+            return 0U;
+        }
+
+        g_square_corner_state = APP_SQUARE_CORNER_STATE_BRAKE;
         g_square_corner_count = 0U;
-        g_square_center_missing_count = 0U;
         g_square_corner_direction = APP_SQUARE_CORNER_DEFAULT_DIRECTION;
         g_square_corner_entry_count++;
+        g_square_seen_center_line = 0U;
+        g_square_center_stable_count = 0U;
+        g_square_center_missing_count = 0U;
+        g_square_reacquire_count = 0U;
         Bsp_Motor_SpeedPidStop();
         g_line_last_correction = 0.0f;
+        g_line_left_cmd = 0.0f;
+        g_line_right_cmd = 0.0f;
+        g_line_correction = 0.0f;
+        g_line_valid = line_valid;
+        g_line_target = line_valid ? Bsp_Ccd_GetTargetIndex() : -1;
+        g_line_error = line_valid ? line_error : g_line_last_error;
+        g_line_error_delta = 0;
         return 1U;
     }
 
-    if (g_square_corner_state == 0U) {
-        return 0U;
+    if (g_square_corner_state == APP_SQUARE_CORNER_STATE_FAULT) {
+        Bsp_Motor_SpeedPidStop();
+        g_line_left_cmd = 0.0f;
+        g_line_right_cmd = 0.0f;
+        g_line_correction = 0.0f;
+        g_line_valid = line_valid;
+        g_line_target = line_valid ? Bsp_Ccd_GetTargetIndex() : -1;
+        g_line_error = line_valid ? line_error : g_line_last_error;
+        g_line_error_delta = 0;
+        return 1U;
     }
 
-    if ((line_valid != 0U) && (black_width != 0U) &&
-        (abs_error <= APP_SQUARE_CORNER_EXIT_ERROR)) {
-        g_square_corner_state = 0U;
+    if (center_reacquired != 0U) {
+        if (g_square_reacquire_count < APP_SQUARE_CORNER_REACQUIRE_LOOPS) {
+            g_square_reacquire_count++;
+        }
+    } else {
+        g_square_reacquire_count = 0U;
+    }
+
+    if (g_square_reacquire_count >= APP_SQUARE_CORNER_REACQUIRE_LOOPS) {
+        g_square_corner_state = APP_SQUARE_CORNER_STATE_TRACK;
         g_square_corner_count = 0U;
+        g_square_seen_center_line = 0U;
+        g_square_center_stable_count = 0U;
+        g_square_center_missing_count = 0U;
+        g_square_reacquire_count = 0U;
         g_line_lost_count = 0U;
         g_line_last_error = line_error;
         g_line_last_correction = 0.0f;
-        g_square_seen_center_line = 1U;
         return 0U;
     }
 
-    if (g_square_corner_state == 1U) {
+    if (g_square_corner_state == APP_SQUARE_CORNER_STATE_BRAKE) {
         Bsp_Motor_SpeedPidStop();
         g_square_corner_count++;
         if (g_square_corner_count >= APP_SQUARE_CORNER_BRAKE_LOOPS) {
-            g_square_corner_state = 2U;
+            g_square_corner_state = APP_SQUARE_CORNER_STATE_PIVOT;
             g_square_corner_count = 0U;
         }
         g_line_left_cmd = 0.0f;
         g_line_right_cmd = 0.0f;
-    } else {
+    } else if (g_square_corner_state == APP_SQUARE_CORNER_STATE_PIVOT) {
         float pivot = APP_SQUARE_CORNER_PIVOT_SPEED *
                       (float) g_square_corner_direction;
 
@@ -865,10 +921,24 @@ static uint8_t App_SquareCornerTask(void)
         g_line_right_cmd = -pivot;
         g_square_corner_count++;
         if (g_square_corner_count >= APP_SQUARE_CORNER_MAX_PIVOT_LOOPS) {
-            g_square_corner_state = 0U;
+            Bsp_Motor_SpeedPidStop();
+            g_square_corner_state = APP_SQUARE_CORNER_STATE_FAULT;
             g_square_corner_count = 0U;
+            g_square_corner_timeout_count++;
+            g_square_seen_center_line = 0U;
+            g_square_center_stable_count = 0U;
+            g_square_center_missing_count = 0U;
+            g_square_reacquire_count = 0U;
             g_line_last_correction = 0.0f;
+            g_line_left_cmd = 0.0f;
+            g_line_right_cmd = 0.0f;
         }
+    } else {
+        Bsp_Motor_SpeedPidStop();
+        g_square_corner_state = APP_SQUARE_CORNER_STATE_FAULT;
+        g_square_corner_count = 0U;
+        g_line_left_cmd = 0.0f;
+        g_line_right_cmd = 0.0f;
     }
 
     g_line_valid = line_valid;

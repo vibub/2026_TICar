@@ -255,6 +255,9 @@ void Bsp_Ccd_Process(void)
 {
     uint16_t i;
     uint16_t contrast;
+    uint16_t candidate_width;
+    const uint16_t roi_start = BSP_CCD_IGNORE_EDGE_PIXELS;
+    const uint16_t roi_end = BSP_CCD_PIXEL_COUNT - BSP_CCD_IGNORE_EDGE_PIXELS;
 
     for (i = 0U; i < BSP_CCD_PIXEL_COUNT; i++) {
         uint16_t left = (i == 0U) ? g_ccd_raw[i] : g_ccd_raw[i - 1U];
@@ -262,18 +265,19 @@ void Bsp_Ccd_Process(void)
         g_ccd_filtered[i] = Ccd_Median3(left, g_ccd_raw[i], right);
     }
 
-    g_ccd_raw_min = g_ccd_filtered[0];
-    g_ccd_raw_max = g_ccd_filtered[0];
-    g_ccd_raw_min_index = 0U;
-    g_ccd_raw_max_index = 0U;
-    for (i = 1U; i < BSP_CCD_PIXEL_COUNT; i++) {
+    /* 亮度统计只使用中间有效区域，避免 CCD 两端固定坏点抬高整帧对比度。 */
+    g_ccd_raw_min = g_ccd_filtered[roi_start];
+    g_ccd_raw_max = g_ccd_filtered[roi_start];
+    g_ccd_raw_min_index = roi_start;
+    g_ccd_raw_max_index = roi_start;
+    for (i = roi_start + 1U; i < roi_end; i++) {
         if (g_ccd_filtered[i] < g_ccd_raw_min) {
-            g_ccd_raw_min = g_ccd_filtered[i]; // Track darkest filtered pixel for adaptive thresholding.
-            g_ccd_raw_min_index = i; // Track darkest pixel index to catch edge artifacts.
+            g_ccd_raw_min = g_ccd_filtered[i];
+            g_ccd_raw_min_index = i;
         }
         if (g_ccd_filtered[i] > g_ccd_raw_max) {
-            g_ccd_raw_max = g_ccd_filtered[i]; // Track brightest filtered pixel for adaptive thresholding.
-            g_ccd_raw_max_index = i; // Track brightest pixel index for CCD sanity checks.
+            g_ccd_raw_max = g_ccd_filtered[i];
+            g_ccd_raw_max_index = i;
         }
     }
 
@@ -281,50 +285,59 @@ void Bsp_Ccd_Process(void)
     g_ccd_contrast = contrast;
     g_ccd_threshold = g_ccd_raw_min +
                       (uint16_t) (((uint32_t) contrast * BSP_CCD_THRESHOLD_NUMERATOR) /
-                                  BSP_CCD_THRESHOLD_DENOMINATOR); // Pixels below this value are treated as black line candidates.
+                                  BSP_CCD_THRESHOLD_DENOMINATOR); // 低于阈值的像素作为黑线候选。
 
     g_ccd_dx_max = 0;
     g_ccd_dx_min = 0;
-    g_ccd_dx_max_index = 0U;
-    g_ccd_dx_min_index = 0U;
+    g_ccd_dx_max_index = roi_start;
+    g_ccd_dx_min_index = roi_start;
     for (i = 0U; i < (BSP_CCD_PIXEL_COUNT - 3U); i++) {
-        g_ccd_dx[i] = (int16_t) g_ccd_filtered[i] - (int16_t) g_ccd_filtered[i + 3U]; // 2025 CCD algorithm: compare each pixel with the sample three positions ahead.
-        if (g_ccd_dx[i] > g_ccd_dx_max) {
-            g_ccd_dx_max = g_ccd_dx[i];
-            g_ccd_dx_max_index = i; // Mirror 2025 MaxIdx for debugger inspection.
-        }
-        if (g_ccd_dx[i] < g_ccd_dx_min) {
-            g_ccd_dx_min = g_ccd_dx[i];
-            g_ccd_dx_min_index = i; // Mirror 2025 MinIdx for debugger inspection.
+        g_ccd_dx[i] = (int16_t) g_ccd_filtered[i] - (int16_t) g_ccd_filtered[i + 3U];
+        if ((i >= roi_start) && ((i + 3U) < roi_end)) {
+            if (g_ccd_dx[i] > g_ccd_dx_max) {
+                g_ccd_dx_max = g_ccd_dx[i];
+                g_ccd_dx_max_index = i;
+            }
+            if (g_ccd_dx[i] < g_ccd_dx_min) {
+                g_ccd_dx_min = g_ccd_dx[i];
+                g_ccd_dx_min_index = i;
+            }
         }
     }
+    for (; i < BSP_CCD_PIXEL_COUNT; i++) {
+        g_ccd_dx[i] = 0; // 清除未参与三像素差分的末端槽位，避免 Watch 显示上一帧残值。
+    }
 
+    candidate_width = (g_ccd_dx_max_index < g_ccd_dx_min_index) ?
+                      (g_ccd_dx_min_index - g_ccd_dx_max_index + 1U) : 0U;
     if ((g_ccd_dx_max_index < g_ccd_dx_min_index) &&
         ((g_ccd_dx_min_index - g_ccd_dx_max_index) > BSP_CCD_TARGET_MIN_EDGE_GAP) &&
+        (candidate_width >= BSP_CCD_MIN_BLACK_WIDTH) &&
+        (contrast >= BSP_CCD_MIN_CONTRAST) &&
         (g_ccd_dx_max > 0) &&
         (g_ccd_dx_min < 0)) {
         g_ccd_line_valid = 1U;
-        g_ccd_black_width = g_ccd_dx_min_index - g_ccd_dx_max_index + 1U;
+        g_ccd_black_width = candidate_width;
         g_ccd_black_left = (int16_t) g_ccd_dx_max_index;
         g_ccd_black_right = (int16_t) g_ccd_dx_min_index;
-        g_ccd_target_index = (int16_t) ((g_ccd_dx_max_index + g_ccd_dx_min_index) >> 1U); // Match 2025: center is midpoint of strongest positive/negative edges.
+        g_ccd_target_index = (int16_t) ((g_ccd_dx_max_index + g_ccd_dx_min_index) >> 1U);
         g_ccd_last_valid_target = g_ccd_target_index;
         g_ccd_has_last_valid_target = 1U;
-        g_ccd_line_error = g_ccd_target_index - BSP_CCD_CENTER_INDEX; // Positive error means the detected line is to the right.
+        g_ccd_line_error = g_ccd_target_index - BSP_CCD_CENTER_INDEX;
     } else if (((g_ccd_dx_max - g_ccd_dx_min) < BSP_CCD_WEAK_EDGE_DELTA) &&
                (g_ccd_has_last_valid_target != 0U)) {
         g_ccd_line_valid = 1U;
         g_ccd_black_width = 0U;
         g_ccd_black_left = -1;
         g_ccd_black_right = -1;
-        g_ccd_target_index = g_ccd_last_valid_target; // STM32-style continuity: keep last reliable center through weak CCD frames.
+        g_ccd_target_index = g_ccd_last_valid_target; // 弱边沿仅桥接最近可靠中心，不刷新可靠目标历史。
         g_ccd_line_error = g_ccd_target_index - BSP_CCD_CENTER_INDEX;
     } else {
         g_ccd_line_valid = 0U;
         g_ccd_black_width = 0U;
         g_ccd_black_left = -1;
         g_ccd_black_right = -1;
-        g_ccd_target_index = -1; // -1 means no reliable black line was detected.
+        g_ccd_target_index = -1;
         g_ccd_line_error = 0;
     }
 }
