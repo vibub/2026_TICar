@@ -20,124 +20,120 @@
 #include "protocol_tjc.h"
 
 /* 电机映射测试：用明显不同的左右轮比例观察底盘偏航方向。 */
-#define APP_MOTOR_TEST_SLOW_SPEED 0.18f
-#define APP_MOTOR_TEST_FAST_SPEED 0.45f
+#define APP_MOTOR_TEST_SLOW_SPEED 0.18f // 电机映射测试中的低速轮比例参考。
+#define APP_MOTOR_TEST_FAST_SPEED 0.45f // 电机映射测试中的高速轮比例参考。
 
-/* CCD Watch 在 RAM 中保留最近 32 帧完整像素，供 CCS Memory Browser 导出。 */
-#define APP_CCD_LOG_FRAME_COUNT 32U
+/* CCD Watch 在 RAM 中保留最近若干帧完整像素，供 CCS Memory Browser 导出。 */
+#define APP_CCD_LOG_FRAME_COUNT 32U // CCD 完整像素调试环形日志保存的帧数。
 
 /*
  * 通用巡线参数。
  * 误差单位为 CCD 像素索引；base speed 是巡线层比例参考，随后映射为 cm/s 轮速目标。
  * 误差越大，基础速度越低、最小转向量越大；修正变化率限制用于抑制 CCD 抖动造成的底盘突变。
  */
-#define APP_LINE_BASE_SPEED 0.49f
-#define APP_LINE_BASE_TARGET_CM_S 30.0f
-#define APP_LINE_KP 0.0005f
-#define APP_LINE_KD 0.0010f
-#define APP_LINE_STEER_LIMIT 0.130f
-#define APP_LINE_MEDIUM_MIN_STEER 0.020f
-#define APP_LINE_LARGE_MIN_STEER 0.090f
-#define APP_LINE_CORRECTION_SLEW_LIMIT 0.035f
-#define APP_LINE_MEDIUM_SPEED_SCALE 0.65f
-#define APP_LINE_LARGE_SPEED_SCALE 0.39f
-#define APP_LINE_DEADBAND_ERROR 3 // 中心黑线死区
-#define APP_LINE_MEDIUM_ERROR 6
-#define APP_LINE_LARGE_ERROR 12
-#define APP_LINE_STEER_SIGN 1.0f
+#define APP_LINE_BASE_SPEED 0.49f // 巡线层基础比例参考，同时作为比例参考到 cm/s 的换算基准。
+#define APP_LINE_BASE_TARGET_CM_S 30.0f // 黑线居中时左右轮的基础目标速度，单位 cm/s。
+#define APP_LINE_KP 0.0005f // CCD 当前中心误差的比例修正系数。
+#define APP_LINE_KD 0.0010f // CCD 相邻帧误差变化的微分修正系数。
+#define APP_LINE_STEER_LIMIT 0.130f // 单次巡线转向修正量的最大绝对值。
+#define APP_LINE_MEDIUM_MIN_STEER 0.020f // 中等偏差时保证执行的最小转向修正量。
+#define APP_LINE_LARGE_MIN_STEER 0.090f // 大偏差时保证执行的最小转向修正量。
+#define APP_LINE_CORRECTION_SLEW_LIMIT 0.035f // 相邻 20 ms 周期允许的最大转向修正变化量。
+#define APP_LINE_MEDIUM_SPEED_SCALE 0.65f // 中等偏差时基础前进速度的缩放比例。
+#define APP_LINE_LARGE_SPEED_SCALE 0.39f // 大偏差时基础前进速度的缩放比例。
+#define APP_LINE_DEADBAND_ERROR 3 // 黑线中心误差绝对值不超过该像素数时不执行转向修正。
+#define APP_LINE_MEDIUM_ERROR 6 // 判定为中等偏差并开始降速的像素误差阈值。
+#define APP_LINE_LARGE_ERROR 12 // 判定为大偏差并执行强转向的像素误差阈值。
+#define APP_LINE_STEER_SIGN 1.0f // CCD 误差到左右轮差速方向的符号，方向相反时改为 -1.0f。
 /* CCD 直行模式只做有效性门控，不使用中心误差进行转向。 */
-#define APP_CCD_STRAIGHT_SPEED 0.16f
+#define APP_CCD_STRAIGHT_SPEED 0.16f // 模式 8 检测到有效黑线时的固定直行比例参考。
 
 /* 普通/圆形巡线允许短时沿最后一次有效方向低速搜索，超过窗口后主动停车。 */
-#define APP_LINE_LOST_RECOVER_MAX 8U
-#define APP_LINE_LOST_SPEED_SCALE 0.55f
-#define APP_LINE_LOST_TURN 0.040f
+#define APP_LINE_LOST_RECOVER_MAX 8U // 普通和圆形巡线丢线后继续搜索的最大 20 ms 周期数。
+#define APP_LINE_LOST_SPEED_SCALE 0.55f // 普通和圆形巡线丢线搜索时的基础速度缩放比例。
+#define APP_LINE_LOST_TURN 0.040f // 普通和圆形巡线丢线搜索时附加的转向修正量。
 
 /*
- * 方形路线由 CCD 负责直线纠偏、编码器负责边长和 90°差动转向。
+ * 方形路线由 CCD 负责直线纠偏、编码器负责边长和两阶段差动转向。
  * 路线持续循环；全部等待均为非阻塞毫秒时序，TURN 超时以 20 ms 控制周期计数。
  */
-#define APP_SQUARE_LOST_RECOVER_MAX 14U
-#define APP_SQUARE_LOST_SPEED_SCALE 0.45f
-#define APP_SQUARE_LOST_TURN 0.060f
-#define APP_SQUARE_SIDE_LENGTH_CM 94.0f
-#define APP_SQUARE_SLOWDOWN_START_CM 94.0f
-#define APP_SQUARE_APPROACH_TARGET_CM_S 10.0f
-#define APP_SQUARE_EFFECTIVE_TRACK_CM 8.8f // 转向一周标定值
-#define APP_SQUARE_WAIT_LINE_LOOPS 3U
-#define APP_SQUARE_BRAKE_AFTER_STRAIGHT_MS 300U
-#define APP_SQUARE_BRAKE_AFTER_TURN_MS 300U
-#define APP_SQUARE_TURN_TIMEOUT_LOOPS 120U
-#define APP_SQUARE_TURN_TOTAL_ANGLE_DEG 100.0f
-#define APP_SQUARE_TURN_COARSE_ANGLE_DEG 60.0f
-#define APP_SQUARE_TURN_SPEED_REFERENCE 0.25f
-#define APP_SQUARE_TURN_FINE_SPEED_REFERENCE 0.15f
-/* 细转刚启动时短暂使用的最低参考，随后仍回到可独立调整的细转速度。 */
-#define APP_SQUARE_TURN_FINE_START_MIN_REFERENCE 0.17f
-#define APP_SQUARE_TURN_FINE_START_LOOPS 5U
-#define APP_SQUARE_TURN_LINE_ERROR 12
-#define APP_SQUARE_TURN_LINE_LOOPS 3U
-#define APP_SQUARE_TURN_DIRECTION (-1)
-#define APP_SQUARE_TURN_PHASE_COARSE 0U
-#define APP_SQUARE_TURN_PHASE_FINE 1U
-#define APP_SQUARE_STATE_WAIT_LINE 0U
-#define APP_SQUARE_STATE_STRAIGHT 1U
-#define APP_SQUARE_STATE_BRAKE_AFTER_STRAIGHT 2U
-#define APP_SQUARE_STATE_TURN 3U
-#define APP_SQUARE_STATE_BRAKE_AFTER_TURN 4U
-#define APP_SQUARE_STATE_FAULT 5U
-#define APP_SQUARE_FAULT_NONE 0U
-#define APP_SQUARE_FAULT_SPEED 1U
-#define APP_SQUARE_FAULT_TURN_TIMEOUT 2U
-#define APP_SQUARE_FAULT_INTERNAL_STATE 3U
-/* 速度测试以 20 ms 为一步，循环执行静止、20、30、20 cm/s 四个阶段。 */
-#define APP_SPEED_TEST_LOW_CM_S 20.0f
-#define APP_SPEED_TEST_HIGH_CM_S 30.0f
-#define APP_SPEED_TEST_WARMUP_LOOPS 250U
-#define APP_SPEED_TEST_HOLD_LOOPS 250U
+#define APP_SQUARE_LOST_RECOVER_MAX 14U // 方形直线段丢线后继续搜索的最大 20 ms 周期数。
+#define APP_SQUARE_LOST_SPEED_SCALE 0.45f // 方形直线段丢线搜索时的基础速度缩放比例。
+#define APP_SQUARE_LOST_TURN 0.060f // 方形直线段丢线搜索时附加的转向修正量。
+#define APP_SQUARE_SIDE_LENGTH_CM 94.0f // 方形路线每条直线边的编码器目标距离，单位 cm。
+#define APP_SQUARE_SLOWDOWN_START_CM 94.0f // 直线段开始使用末端接近速度的距离，单位 cm。
+#define APP_SQUARE_APPROACH_TARGET_CM_S 20.0f // 直线末端减速接近时的目标轮速，单位 cm/s。
+#define APP_SQUARE_EFFECTIVE_TRACK_CM 8.8f // 根据实车转向标定得到的有效轮距，决定编码器转角距离。
+#define APP_SQUARE_WAIT_LINE_LOOPS 3U // 等待启动或转向结束后确认真实黑线所需的连续帧数。
+#define APP_SQUARE_BRAKE_AFTER_STRAIGHT_MS 300U // 每条直线结束后转向前的主动制动时间，单位 ms。
+#define APP_SQUARE_BRAKE_AFTER_TURN_MS 300U // 每次转向结束后重新巡线前的主动制动时间，单位 ms。
+#define APP_SQUARE_TURN_TIMEOUT_LOOPS 120U // 整次转向允许的最大 20 ms 控制周期数。
+#define APP_SQUARE_TURN_TOTAL_ANGLE_DEG 100.0f // CCD 未提前找到线时编码器允许的最大总转角，单位度。
+#define APP_SQUARE_TURN_COARSE_ANGLE_DEG 60.0f // 进入 CCD 细转找线前的编码器粗转角度，单位度。
+#define APP_SQUARE_TURN_SPEED_REFERENCE 0.30f // 粗转阶段的轮速比例参考。
+#define APP_SQUARE_TURN_FINE_SPEED_REFERENCE 0.19f // CCD 找线细转阶段稳定运行时的轮速比例参考。
+#define APP_SQUARE_TURN_FINE_START_MIN_REFERENCE 0.19f // 细转刚启动时为克服静摩擦使用的最低比例参考。
+#define APP_SQUARE_TURN_FINE_START_LOOPS 5U // 细转最低启动参考保持的 20 ms 周期数。
+#define APP_SQUARE_TURN_LINE_ERROR 12 // 细转时允许判定为已对准新线的最大中心像素误差。
+#define APP_SQUARE_TURN_LINE_LOOPS 3U // 细转提前结束前要求连续识别到新线的帧数。
+#define APP_SQUARE_TURN_DIRECTION (-1) // 固定转向方向：-1 与 +1 分别对应相反的差动转向方向。
+#define APP_SQUARE_TURN_PHASE_COARSE 0U // 方形路线转向状态中的编码器粗转阶段编号。
+#define APP_SQUARE_TURN_PHASE_FINE 1U // 方形路线转向状态中的 CCD 低速找线阶段编号。
+#define APP_SQUARE_STATE_WAIT_LINE 0U // 方形路线停车等待可靠黑线状态。
+#define APP_SQUARE_STATE_STRAIGHT 1U // 方形路线 CCD 纠偏定距直线状态。
+#define APP_SQUARE_STATE_BRAKE_AFTER_STRAIGHT 2U // 直线结束后转向前的制动等待状态。
+#define APP_SQUARE_STATE_TURN 3U // 方形路线编码器粗转和 CCD 细转状态。
+#define APP_SQUARE_STATE_BRAKE_AFTER_TURN 4U // 转向结束后下一条直线前的制动等待状态。
+#define APP_SQUARE_STATE_FAULT 5U // 方形路线故障锁存并保持停车状态。
+#define APP_SQUARE_FAULT_NONE 0U // 方形路线当前无故障。
+#define APP_SQUARE_FAULT_SPEED 1U // 速度闭环或编码器反馈异常故障。
+#define APP_SQUARE_FAULT_TURN_TIMEOUT 2U // 转向超过最大控制周期仍未完成故障。
+#define APP_SQUARE_FAULT_INTERNAL_STATE 3U // 遇到未定义路线状态或转向阶段的内部状态故障。
+
+/* 速度测试以 20 ms 为一步，循环执行静止、低速、高速、低速四个阶段。 */
+#define APP_SPEED_TEST_LOW_CM_S 20.0f // 模式 10 低速阶段的左右轮目标速度，单位 cm/s。
+#define APP_SPEED_TEST_HIGH_CM_S 30.0f // 模式 10 高速阶段的左右轮目标速度，单位 cm/s。
+#define APP_SPEED_TEST_WARMUP_LOOPS 250U // 速度测试静止预热阶段持续的 20 ms 周期数。
+#define APP_SPEED_TEST_HOLD_LOOPS 250U // 速度测试每个非静止速度阶段持续的 20 ms 周期数。
 
 /*
  * K230 云台增量 PID 参数。
  * 图像误差来自 640×360 坐标系；两轴分别计算 P/I/D，合成后限制单帧 compare 增量。
  * Ki 当前保持关闭，但保留积分状态和限幅，便于后续实车调参。
  */
-#define APP_K230_FOLLOW_PAN_KP_NUM 8
-#define APP_K230_FOLLOW_PAN_KP_DEN 100
-#define APP_K230_FOLLOW_PAN_KI_NUM 0
-#define APP_K230_FOLLOW_PAN_KI_DEN 100
-#define APP_K230_FOLLOW_PAN_KD_NUM 4
-#define APP_K230_FOLLOW_PAN_KD_DEN 100
-#define APP_K230_FOLLOW_PAN_INTEGRAL_LIMIT 1000
-#define APP_K230_FOLLOW_TILT_KP_NUM 8
-#define APP_K230_FOLLOW_TILT_KP_DEN 100
-#define APP_K230_FOLLOW_TILT_KI_NUM 0
-#define APP_K230_FOLLOW_TILT_KI_DEN 100
-#define APP_K230_FOLLOW_TILT_KD_NUM 4
-#define APP_K230_FOLLOW_TILT_KD_DEN 100
-#define APP_K230_FOLLOW_TILT_INTEGRAL_LIMIT 1000
-#define APP_K230_FOLLOW_X_DEADBAND 10
-#define APP_K230_FOLLOW_Y_DEADBAND 8
-#define APP_K230_FOLLOW_PAN_MAX_STEP 20
-#define APP_K230_FOLLOW_TILT_MAX_STEP 15
-#define APP_K230_FOLLOW_PAN_DIRECTION (-1)
-#define APP_K230_FOLLOW_TILT_DIRECTION 1
-#define APP_K230_FOLLOW_STARTUP_HOLD_MS 2000U
-#define APP_K230_FOLLOW_STATE_WAIT_LINK 0U
-#define APP_K230_FOLLOW_STATE_TRACKING 1U
-#define APP_K230_FOLLOW_STATE_HOLD 2U
-#define APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED 3U
+#define APP_K230_FOLLOW_PAN_KP_NUM 8 // 水平轴比例系数的分子。
+#define APP_K230_FOLLOW_PAN_KP_DEN 100 // 水平轴比例系数的分母，实际 Kp 为 NUM/DEN。
+#define APP_K230_FOLLOW_PAN_KI_NUM 0 // 水平轴积分系数的分子，0 表示关闭积分修正。
+#define APP_K230_FOLLOW_PAN_KI_DEN 100 // 水平轴积分系数的分母，实际 Ki 为 NUM/DEN。
+#define APP_K230_FOLLOW_PAN_KD_NUM 4 // 水平轴微分系数的分子。
+#define APP_K230_FOLLOW_PAN_KD_DEN 100 // 水平轴微分系数的分母，实际 Kd 为 NUM/DEN。
+#define APP_K230_FOLLOW_PAN_INTEGRAL_LIMIT 1000 // 水平轴积分误差累计值的绝对值上限。
+#define APP_K230_FOLLOW_TILT_KP_NUM 8 // 垂直轴比例系数的分子。
+#define APP_K230_FOLLOW_TILT_KP_DEN 100 // 垂直轴比例系数的分母，实际 Kp 为 NUM/DEN。
+#define APP_K230_FOLLOW_TILT_KI_NUM 0 // 垂直轴积分系数的分子，0 表示关闭积分修正。
+#define APP_K230_FOLLOW_TILT_KI_DEN 100 // 垂直轴积分系数的分母，实际 Ki 为 NUM/DEN。
+#define APP_K230_FOLLOW_TILT_KD_NUM 4 // 垂直轴微分系数的分子。
+#define APP_K230_FOLLOW_TILT_KD_DEN 100 // 垂直轴微分系数的分母，实际 Kd 为 NUM/DEN。
+#define APP_K230_FOLLOW_TILT_INTEGRAL_LIMIT 1000 // 垂直轴积分误差累计值的绝对值上限。
+#define APP_K230_FOLLOW_X_DEADBAND 10 // 水平图像误差绝对值不超过该像素数时不调整云台。
+#define APP_K230_FOLLOW_Y_DEADBAND 8 // 垂直图像误差绝对值不超过该像素数时不调整云台。
+#define APP_K230_FOLLOW_PAN_MAX_STEP 20 // 水平轴单帧允许变化的最大 PWM compare 增量。
+#define APP_K230_FOLLOW_TILT_MAX_STEP 15 // 垂直轴单帧允许变化的最大 PWM compare 增量。
+#define APP_K230_FOLLOW_PAN_DIRECTION (-1) // 水平图像误差映射到云台移动方向的符号。
+#define APP_K230_FOLLOW_TILT_DIRECTION 1 // 垂直图像误差映射到云台移动方向的符号。
+#define APP_K230_FOLLOW_STARTUP_HOLD_MS 2000U // 模式 12 启动后等待 K230 链路稳定的保持时间，单位 ms。
+#define APP_K230_FOLLOW_STATE_WAIT_LINK 0U // K230 云台跟随等待通信链路状态编号。
+#define APP_K230_FOLLOW_STATE_TRACKING 1U // K230 云台正常跟踪目标状态编号。
+#define APP_K230_FOLLOW_STATE_HOLD 2U // K230 暂时无新目标时保持当前位置状态编号。
+#define APP_K230_FOLLOW_STATE_TIMEOUT_DISABLED 3U // K230 链路超时后禁用云台输出状态编号。
 
-/* 运动模式切换前保持 100 ms 主动制动，降低惯性带来的模式交叉影响。 */
-#define APP_MODE_SWITCH_BRAKE_MS 100U
-/* 快速周期用于 CCD、编码器和速度闭环；打印周期控制串口负载；慢速周期用于心跳和 UART 测试。 */
-#define APP_LOOP_FAST_MS 20U
-#define APP_LOOP_PRINT_MS 500U
-#define APP_LOOP_SLOW_MS 1000U
-
-/* 模式切换状态：稳定运行、制动等待、执行退出/进入提交。 */
-#define APP_SWITCH_IDLE 0U
-#define APP_SWITCH_BRAKING 1U
-#define APP_SWITCH_ENTERING 2U
+#define APP_MODE_SWITCH_BRAKE_MS 100U // 运动模式切换前主动制动的保持时间，单位 ms。
+#define APP_LOOP_FAST_MS 20U // CCD、编码器和速度闭环任务的快速调度周期，单位 ms。
+#define APP_LOOP_PRINT_MS 500U // CCD 调试打印和 Watch 日志更新的低频周期，单位 ms。
+#define APP_LOOP_SLOW_MS 1000U // 心跳和 UART 测试等慢速任务的调度周期，单位 ms。
+#define APP_SWITCH_IDLE 0U // 模式管理器处于稳定运行且没有切换请求的状态编号。
+#define APP_SWITCH_BRAKING 1U // 模式管理器正在执行切换前主动制动的状态编号。
+#define APP_SWITCH_ENTERING 2U // 模式管理器正在退出旧模式并进入新模式的状态编号。
 
 /*
  * 三种巡线模式共享的参数集合。
