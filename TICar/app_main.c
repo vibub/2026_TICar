@@ -68,6 +68,7 @@
 #define APP_SQUARE_BRAKE_AFTER_STRAIGHT_MS 300U // 每条直线结束后转向前的主动制动时间，单位 ms。
 #define APP_SQUARE_BRAKE_AFTER_TURN_MS 300U // 每次转向结束后重新巡线前的主动制动时间，单位 ms。
 #define APP_SQUARE_TURN_TIMEOUT_LOOPS 120U // 整次转向允许的最大 20 ms 控制周期数。
+#define APP_SQUARE_SPEED_FAULT_CONFIRM_LOOPS 25U // 底层速度故障连续保持 25 个控制周期后才锁存路线故障。
 #define APP_SQUARE_TURN_TOTAL_ANGLE_DEG 100.0f // CCD 未提前找到线时编码器允许的最大总转角，单位度。
 #define APP_SQUARE_TURN_COARSE_ANGLE_DEG 60.0f // 进入 CCD 细转找线前的编码器粗转角度，单位度。
 #define APP_SQUARE_TURN_SPEED_REFERENCE 0.30f // 粗转阶段的轮速比例参考。
@@ -338,6 +339,7 @@ static float g_line_last_correction;
 volatile uint8_t g_square_route_state;
 volatile uint8_t g_square_fault_reason;
 volatile uint32_t g_square_fault_speed_bits;
+volatile uint8_t g_square_speed_fault_stable_count;
 volatile uint32_t g_square_state_start_ms;
 volatile uint32_t g_square_state_elapsed_ms;
 volatile uint8_t g_square_wait_line_stable_count;
@@ -523,6 +525,7 @@ static void App_ResetSquareState(void)
     g_square_route_state = APP_SQUARE_STATE_WAIT_LINE;
     g_square_fault_reason = APP_SQUARE_FAULT_NONE;
     g_square_fault_speed_bits = 0U;
+    g_square_speed_fault_stable_count = 0U;
     g_square_state_start_ms = Bsp_Time_GetMilliseconds();
     g_square_state_elapsed_ms = 0U;
     g_square_wait_line_stable_count = 0U;
@@ -895,6 +898,25 @@ static void App_SquareSetState(uint8_t state)
     g_square_state_elapsed_ms = 0U;
 }
 
+/*
+ * 底层速度故障是可自动清除的实时告警；只有连续保持指定周期，
+ * 方形路线才将其升级为需要重新进入模式才能清除的锁存故障。
+ */
+static uint8_t App_SquareConfirmSpeedFault(void)
+{
+    if (Bsp_Motor_GetSpeedFaults() == 0U) {
+        g_square_speed_fault_stable_count = 0U;
+        return 0U;
+    }
+
+    if (g_square_speed_fault_stable_count < APP_SQUARE_SPEED_FAULT_CONFIRM_LOOPS) {
+        g_square_speed_fault_stable_count++;
+    }
+
+    return (g_square_speed_fault_stable_count >=
+            APP_SQUARE_SPEED_FAULT_CONFIRM_LOOPS) ? 1U : 0U;
+}
+
 static void App_SquareEnterFault(uint8_t reason)
 {
     if (g_square_route_state == APP_SQUARE_STATE_FAULT) {
@@ -918,6 +940,7 @@ static void App_SquareEnterWaitLine(void)
     Bsp_Ccd_ResetState();
     App_ResetLineState();
     g_square_wait_line_stable_count = 0U;
+    g_square_speed_fault_stable_count = 0U;
     g_square_straight_output_scale = 0.0f;
     App_SquareSetState(APP_SQUARE_STATE_WAIT_LINE);
     g_mode_last_task_ms = Bsp_Time_GetMilliseconds() - APP_LOOP_FAST_MS;
@@ -978,6 +1001,7 @@ static void App_SquareRouteTask(void)
             g_line_last_error = line_error;
             g_line_last_correction = 0.0f;
             g_line_lost_count = 0U;
+            g_square_speed_fault_stable_count = 0U;
             App_SquareSetState(APP_SQUARE_STATE_STRAIGHT);
             g_mode_last_task_ms = now_ms - APP_LOOP_FAST_MS;
         }
@@ -1013,7 +1037,7 @@ static void App_SquareRouteTask(void)
             (APP_SQUARE_APPROACH_TARGET_CM_S / APP_LINE_BASE_TARGET_CM_S) : 1.0f;
         if (App_FollowTask(&g_square_follow_profile,
                            g_square_straight_output_scale) != 0U) {
-            if (Bsp_Motor_GetSpeedFaults() != 0U) {
+            if (App_SquareConfirmSpeedFault() != 0U) {
                 App_SquareEnterFault(APP_SQUARE_FAULT_SPEED);
             }
         }
@@ -1036,6 +1060,7 @@ static void App_SquareRouteTask(void)
             g_square_turn_fine_start_count = 0U;
             g_square_turn_line_stable_count = 0U;
             g_square_turn_line_found = 0U;
+            g_square_speed_fault_stable_count = 0U;
             App_SquareSetState(APP_SQUARE_STATE_TURN);
             g_mode_last_task_ms = now_ms - APP_LOOP_FAST_MS;
         }
@@ -1074,6 +1099,7 @@ static void App_SquareRouteTask(void)
                 g_square_turn_phase = APP_SQUARE_TURN_PHASE_FINE;
                 g_square_turn_fine_start_count = 0U;
                 g_square_turn_line_stable_count = 0U;
+                g_square_speed_fault_stable_count = 0U;
                 Bsp_Motor_SpeedPidReset();
                 Bsp_Ccd_ResetState();
             }
@@ -1162,7 +1188,7 @@ static void App_SquareRouteTask(void)
                            (-(float) g_square_turn_direction * turn_reference);
         g_square_turn_loop_count++;
 
-        if (Bsp_Motor_GetSpeedFaults() != 0U) {
+        if (App_SquareConfirmSpeedFault() != 0U) {
             App_SquareEnterFault(APP_SQUARE_FAULT_SPEED);
         } else if (g_square_turn_loop_count >= APP_SQUARE_TURN_TIMEOUT_LOOPS) {
             g_square_turn_timeout_count++;

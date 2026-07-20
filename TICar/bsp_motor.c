@@ -53,12 +53,12 @@
 #define BSP_MOTOR_SPEED_PID_OUTPUT_LIMIT 0.50f // Match the 2025 speed-PID output ceiling for the standalone test.
 #define BSP_MOTOR_SPEED_PWM_ACCEL_SLEW_LIMIT 1.0f // The 2025 controller writes each new PID output directly.
 #define BSP_MOTOR_SPEED_PWM_DECEL_SLEW_LIMIT 1.0f // The 2025 controller does not add a separate output slew limiter.
-#define BSP_MOTOR_SPEED_STARTUP_KICK_MIN_TARGET_CM_S 10.0f // Do not kick a bend's nearly stopped inner wheel.
-#define BSP_MOTOR_SPEED_STARTUP_KICK_PWM 0.10f // Match DC_Start(): apply ten-percent PWM before the first PID result.
-#define BSP_MOTOR_SPEED_STARTUP_KICK_WINDOWS 1U // 2025 gives the direct start command once, then hands control to PID.
-#define BSP_MOTOR_SPEED_STALL_MIN_TARGET_CM_S 5.0f // Ignore no-pulse detection while nearly stopped.
-#define BSP_MOTOR_SPEED_STALL_MIN_PWM 0.18f // Start stall timing only after enough PWM should move a lifted wheel.
-#define BSP_MOTOR_SPEED_STALL_WINDOWS 25U // Stop after 500 ms with commanded motion but no encoder batches.
+#define BSP_MOTOR_SPEED_STARTUP_KICK_MIN_TARGET_CM_S 5.0f // 目标速度达到 5 cm/s 时允许使用启动补偿。
+#define BSP_MOTOR_SPEED_STARTUP_KICK_PWM 0.20f // 启动阶段直接施加 20% PWM 以克服静摩擦。
+#define BSP_MOTOR_SPEED_STARTUP_KICK_WINDOWS 5U // 启动补偿最多保持 5 个 20 ms 控制周期。
+#define BSP_MOTOR_SPEED_STALL_MIN_TARGET_CM_S 5.0f // 低于 5 cm/s 时不进行无编码器反馈检测。
+#define BSP_MOTOR_SPEED_STALL_MIN_PWM 0.18f // PWM 至少达到 18% 后才开始累计无反馈周期。
+#define BSP_MOTOR_SPEED_STALL_WINDOWS 50U // 连续 50 个 20 ms 周期无反馈时置位底层实时故障。
 
 /* 单个逻辑轮的速度控制状态，所有速度字段单位为 cm/s，command/P/I 为 PWM 比例贡献。 */
 typedef struct {
