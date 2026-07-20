@@ -30,9 +30,11 @@
 #define BSP_MOTOR_ENCODER_EDGES_PER_REV 14000.0f // A-phase edges per wheel revolution from the 2025 GMR motor definition.
 #define BSP_MOTOR_ENCODER_EDGE_BATCH 10.0f // Match the 2025 same-car edge counter: one software count per ten A-phase edges.
 #define BSP_MOTOR_SPEED_SAMPLE_SECONDS 0.020f // The application calls the speed loop every 20 ms.
-#define BSP_MOTOR_ENCODER_TICK_TO_CM_S \
+#define BSP_MOTOR_ENCODER_TICK_TO_CM \
     ((3.14159265f * BSP_MOTOR_ENCODER_WHEEL_DIAMETER_CM * BSP_MOTOR_ENCODER_EDGE_BATCH) / \
-     (BSP_MOTOR_ENCODER_EDGES_PER_REV * BSP_MOTOR_SPEED_SAMPLE_SECONDS))
+     BSP_MOTOR_ENCODER_EDGES_PER_REV)
+#define BSP_MOTOR_ENCODER_TICK_TO_CM_S \
+    (BSP_MOTOR_ENCODER_TICK_TO_CM / BSP_MOTOR_SPEED_SAMPLE_SECONDS)
 /*
  * 轮速闭环调参。
  * 目标先限幅并按步长逼近；测量值可滤波；控制器包含 P/I/D 项、条件积分、启动 kick 和输出限幅。
@@ -418,35 +420,56 @@ void Bsp_Motor_EncoderInit(void)
 /* 原子清零 ISR 累计位置，并同步清除主循环采样基线和窗口速度。 */
 void Bsp_Motor_EncoderReset(void)
 {
+    uint32_t interrupt_state = __get_PRIMASK();
+
     __disable_irq();
-    s_encoder_old_left_count = 0; // Clear raw old-left encoder position atomically.
-    s_encoder_old_right_count = 0; // Clear raw old-right encoder position atomically.
-    __enable_irq();
-    s_encoder_left_last_count = 0; // Reset logical-left sample baseline.
-    s_encoder_right_last_count = 0; // Reset logical-right sample baseline.
-    s_encoder_left_speed = 0; // Reset logical-left sample speed.
-    s_encoder_right_speed = 0; // Reset logical-right sample speed.
+    s_encoder_old_left_count = 0;
+    s_encoder_old_right_count = 0;
+    s_encoder_left_last_count = 0;
+    s_encoder_right_last_count = 0;
+    s_encoder_left_speed = 0;
+    s_encoder_right_speed = 0;
+    if (interrupt_state == 0U) {
+        __enable_irq(); // 仅恢复本函数进入前处于开启状态的全局中断。
+    }
+}
+
+void Bsp_Motor_GetEncoderSnapshot(Bsp_Motor_EncoderSnapshot *snapshot)
+{
+    uint32_t interrupt_state;
+
+    if (snapshot == 0) {
+        return;
+    }
+
+    interrupt_state = __get_PRIMASK();
+    __disable_irq();
+    snapshot->left_count = s_encoder_old_left_count;
+    snapshot->right_count = s_encoder_old_right_count;
+    if (interrupt_state == 0U) {
+        __enable_irq();
+    }
+}
+
+float Bsp_Motor_EncoderTicksToCm(uint32_t ticks)
+{
+    return (float) ticks * BSP_MOTOR_ENCODER_TICK_TO_CM;
 }
 
 /* 短暂关中断读取一致的累计计数，并计算相对上次采样的有符号 tick 增量。 */
 void Bsp_Motor_EncoderSample(void)
 {
-    int32_t left_count;
-    int32_t right_count;
+    Bsp_Motor_EncoderSnapshot snapshot;
     int32_t left_delta;
     int32_t right_delta;
 
-    __disable_irq();
-    left_count = s_encoder_old_left_count; // PB13/PB20 now belong to the physical-left six-wire connector.
-    right_count = s_encoder_old_right_count; // PB15/PB17 now belong to the physical-right six-wire connector.
-    __enable_irq();
-
-    left_delta = left_count - s_encoder_left_last_count;
-    right_delta = right_count - s_encoder_right_last_count;
-    s_encoder_left_last_count = left_count; // Store baseline for the next speed sample.
-    s_encoder_right_last_count = right_count; // Store baseline for the next speed sample.
-    s_encoder_left_speed = Motor_LimitInt16(left_delta); // Expose signed raw ticks for direction checks.
-    s_encoder_right_speed = Motor_LimitInt16(right_delta); // Expose signed raw ticks for direction checks.
+    Bsp_Motor_GetEncoderSnapshot(&snapshot);
+    left_delta = snapshot.left_count - s_encoder_left_last_count;
+    right_delta = snapshot.right_count - s_encoder_right_last_count;
+    s_encoder_left_last_count = snapshot.left_count;
+    s_encoder_right_last_count = snapshot.right_count;
+    s_encoder_left_speed = Motor_LimitInt16(left_delta);
+    s_encoder_right_speed = Motor_LimitInt16(right_delta);
 }
 
 int32_t Bsp_Motor_GetLeftEncoderCount(void)

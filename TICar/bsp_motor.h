@@ -7,6 +7,12 @@
 
 #include <stdint.h>
 
+/** 左右编码器累计计数的一致快照，两个值在同一临界区内读取。 */
+typedef struct {
+    int32_t left_count;
+    int32_t right_count;
+} Bsp_Motor_EncoderSnapshot;
+
 /* H 桥和 PWM 控制。 */
 void Bsp_Motor_Init(void);    /* 初始化后保持驱动桥空闲。 */
 void Bsp_Motor_Disable(void); /* 停止 PWM 并让驱动桥进入电气空闲状态。 */
@@ -22,6 +28,10 @@ void Bsp_Motor_SetRightRaw(uint8_t dir_high, uint32_t compare);
 void Bsp_Motor_EncoderInit(void);
 void Bsp_Motor_EncoderReset(void);
 void Bsp_Motor_EncoderSample(void);
+/** 原子读取左右累计计数，避免路线距离计算使用不同时刻的两轮数据。 */
+void Bsp_Motor_GetEncoderSnapshot(Bsp_Motor_EncoderSnapshot *snapshot);
+/** 将软件编码器 tick 的绝对数量换算为轮缘行驶距离，单位为 cm。 */
+float Bsp_Motor_EncoderTicksToCm(uint32_t ticks);
 int32_t Bsp_Motor_GetLeftEncoderCount(void);
 int32_t Bsp_Motor_GetRightEncoderCount(void);
 int16_t Bsp_Motor_GetLeftEncoderSpeed(void);

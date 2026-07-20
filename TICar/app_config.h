@@ -33,7 +33,7 @@
 #define APP_MODE_CIRCLE_FOLLOW 11
 /* 模式号 12：根据 K230 目标误差增量控制双轴云台。 */
 #define APP_MODE_K230_FOLLOW 12
-/* 模式号 13：方形赛道巡线，并处理直角制动和原地找线。 */
+/* 模式号 13：CCD 修正直线方向，编码器控制固定边长和 90°差动转向并持续循环。 */
 #define APP_MODE_SQUARE_FOLLOW 13
 
 /*
