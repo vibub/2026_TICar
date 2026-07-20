@@ -64,7 +64,6 @@
 #define APP_SQUARE_SLOWDOWN_START_CM 98.0f
 #define APP_SQUARE_APPROACH_TARGET_CM_S 10.0f
 #define APP_SQUARE_EFFECTIVE_TRACK_CM 15.0f
-#define APP_SQUARE_WAIT_LINE_ERROR 8
 #define APP_SQUARE_WAIT_LINE_LOOPS 3U
 #define APP_SQUARE_BRAKE_AFTER_STRAIGHT_MS 300U
 #define APP_SQUARE_BRAKE_AFTER_TURN_MS 300U
@@ -917,7 +916,6 @@ static void App_SquareRouteTask(void)
 
     if (g_square_route_state == APP_SQUARE_STATE_WAIT_LINE) {
         int16_t line_error;
-        int16_t abs_error;
         uint8_t reliable_line;
 
         if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
@@ -928,10 +926,9 @@ static void App_SquareRouteTask(void)
         Bsp_Ccd_Process();
         App_UpdateLineSensorWatch();
         line_error = Bsp_Ccd_GetLineError();
-        abs_error = (line_error < 0) ? (int16_t) (-line_error) : line_error;
+        /* 只要求连续检测到真实黑线；偏离中心时由 STRAIGHT 巡线控制自行纠正，避免启动死锁。 */
         reliable_line = ((Bsp_Ccd_IsLineValid() != 0U) &&
-                         (Bsp_Ccd_GetBlackWidth() != 0U) &&
-                         (abs_error <= APP_SQUARE_WAIT_LINE_ERROR)) ? 1U : 0U;
+                         (Bsp_Ccd_GetBlackWidth() != 0U)) ? 1U : 0U;
 
         g_line_valid = reliable_line;
         g_line_target = reliable_line ? Bsp_Ccd_GetTargetIndex() : -1;
