@@ -33,7 +33,7 @@
  */
 #define APP_LINE_BASE_SPEED 0.49f
 #define APP_LINE_BASE_TARGET_CM_S 30.0f
-#define APP_LINE_KP 0.0008f
+#define APP_LINE_KP 0.0005f
 #define APP_LINE_KD 0.0010f
 #define APP_LINE_STEER_LIMIT 0.130f
 #define APP_LINE_MEDIUM_MIN_STEER 0.020f
@@ -67,9 +67,19 @@
 #define APP_SQUARE_WAIT_LINE_LOOPS 3U
 #define APP_SQUARE_BRAKE_AFTER_STRAIGHT_MS 300U
 #define APP_SQUARE_BRAKE_AFTER_TURN_MS 300U
-#define APP_SQUARE_TURN_TIMEOUT_LOOPS 90U
-#define APP_SQUARE_TURN_SPEED_REFERENCE 0.16f
+#define APP_SQUARE_TURN_TIMEOUT_LOOPS 120U
+#define APP_SQUARE_TURN_TOTAL_ANGLE_DEG 100.0f
+#define APP_SQUARE_TURN_COARSE_ANGLE_DEG 60.0f
+#define APP_SQUARE_TURN_SPEED_REFERENCE 0.25f
+#define APP_SQUARE_TURN_FINE_SPEED_REFERENCE 0.15f
+/* 细转刚启动时短暂使用的最低参考，随后仍回到可独立调整的细转速度。 */
+#define APP_SQUARE_TURN_FINE_START_MIN_REFERENCE 0.17f
+#define APP_SQUARE_TURN_FINE_START_LOOPS 5U
+#define APP_SQUARE_TURN_LINE_ERROR 12
+#define APP_SQUARE_TURN_LINE_LOOPS 3U
 #define APP_SQUARE_TURN_DIRECTION (-1)
+#define APP_SQUARE_TURN_PHASE_COARSE 0U
+#define APP_SQUARE_TURN_PHASE_FINE 1U
 #define APP_SQUARE_STATE_WAIT_LINE 0U
 #define APP_SQUARE_STATE_STRAIGHT 1U
 #define APP_SQUARE_STATE_BRAKE_AFTER_STRAIGHT 2U
@@ -345,6 +355,11 @@ volatile float g_square_straight_right_cm;
 volatile float g_square_straight_center_cm;
 volatile float g_square_straight_output_scale;
 volatile int8_t g_square_turn_direction;
+volatile uint8_t g_square_turn_phase;
+volatile uint8_t g_square_turn_fine_start_count;
+volatile uint8_t g_square_turn_line_stable_count;
+volatile uint8_t g_square_turn_line_found;
+volatile float g_square_turn_coarse_target_cm;
 volatile float g_square_turn_target_cm;
 volatile float g_square_turn_left_cm;
 volatile float g_square_turn_right_cm;
@@ -525,7 +540,16 @@ static void App_ResetSquareState(void)
     g_square_straight_center_cm = 0.0f;
     g_square_straight_output_scale = 0.0f;
     g_square_turn_direction = APP_SQUARE_TURN_DIRECTION;
-    g_square_turn_target_cm = 3.14159265f * APP_SQUARE_EFFECTIVE_TRACK_CM / 4.0f;
+    g_square_turn_phase = APP_SQUARE_TURN_PHASE_COARSE;
+    g_square_turn_fine_start_count = 0U;
+    g_square_turn_line_stable_count = 0U;
+    g_square_turn_line_found = 0U;
+    g_square_turn_coarse_target_cm =
+        3.14159265f * APP_SQUARE_EFFECTIVE_TRACK_CM *
+        APP_SQUARE_TURN_COARSE_ANGLE_DEG / 360.0f;
+    g_square_turn_target_cm =
+        3.14159265f * APP_SQUARE_EFFECTIVE_TRACK_CM *
+        APP_SQUARE_TURN_TOTAL_ANGLE_DEG / 360.0f;
     g_square_turn_left_cm = 0.0f;
     g_square_turn_right_cm = 0.0f;
     g_square_turn_left_done = 0U;
@@ -1012,6 +1036,10 @@ static void App_SquareRouteTask(void)
             g_square_turn_right_done = 0U;
             g_square_turn_loop_count = 0U;
             g_square_turn_direction = APP_SQUARE_TURN_DIRECTION;
+            g_square_turn_phase = APP_SQUARE_TURN_PHASE_COARSE;
+            g_square_turn_fine_start_count = 0U;
+            g_square_turn_line_stable_count = 0U;
+            g_square_turn_line_found = 0U;
             App_SquareSetState(APP_SQUARE_STATE_TURN);
             g_mode_last_task_ms = now_ms - APP_LOOP_FAST_MS;
         }
@@ -1019,6 +1047,8 @@ static void App_SquareRouteTask(void)
     }
 
     if (g_square_route_state == APP_SQUARE_STATE_TURN) {
+        float active_target_cm;
+        float turn_reference;
         float turn_speed_cm_s;
         float left_target_cm_s;
         float right_target_cm_s;
@@ -1034,20 +1064,95 @@ static void App_SquareRouteTask(void)
         right_ticks = App_EncoderAbsDelta(snapshot.right_count, g_square_right_start_count);
         g_square_turn_left_cm = Bsp_Motor_EncoderTicksToCm(left_ticks);
         g_square_turn_right_cm = Bsp_Motor_EncoderTicksToCm(right_ticks);
-        g_square_turn_left_done =
-            (g_square_turn_left_cm >= g_square_turn_target_cm) ? 1U : 0U;
-        g_square_turn_right_done =
-            (g_square_turn_right_cm >= g_square_turn_target_cm) ? 1U : 0U;
+
+        if (g_square_turn_phase == APP_SQUARE_TURN_PHASE_COARSE) {
+            active_target_cm = g_square_turn_coarse_target_cm;
+            g_square_turn_left_done =
+                (g_square_turn_left_cm >= active_target_cm) ? 1U : 0U;
+            g_square_turn_right_done =
+                (g_square_turn_right_cm >= active_target_cm) ? 1U : 0U;
+
+            if ((g_square_turn_left_done != 0U) &&
+                (g_square_turn_right_done != 0U)) {
+                /* 粗转结束后重启速度环并短暂抬高细转参考，避免低速目标无法克服静摩擦。 */
+                g_square_turn_phase = APP_SQUARE_TURN_PHASE_FINE;
+                g_square_turn_fine_start_count = 0U;
+                g_square_turn_line_stable_count = 0U;
+                Bsp_Motor_SpeedPidReset();
+                Bsp_Ccd_ResetState();
+            }
+        } else if (g_square_turn_phase != APP_SQUARE_TURN_PHASE_FINE) {
+            App_SquareEnterFault(APP_SQUARE_FAULT_INTERNAL_STATE);
+            return;
+        }
+
+        if (g_square_turn_phase == APP_SQUARE_TURN_PHASE_FINE) {
+            int16_t line_error;
+            int16_t abs_error;
+            uint8_t reliable_line;
+
+            Bsp_Ccd_ReadFrame();
+            Bsp_Ccd_Process();
+            App_UpdateLineSensorWatch();
+            line_error = Bsp_Ccd_GetLineError();
+            abs_error = (line_error < 0) ? (int16_t) (-line_error) : line_error;
+            reliable_line = ((Bsp_Ccd_IsLineValid() != 0U) &&
+                             (Bsp_Ccd_GetBlackWidth() != 0U) &&
+                             (abs_error <= APP_SQUARE_TURN_LINE_ERROR)) ? 1U : 0U;
+
+            g_line_valid = reliable_line;
+            g_line_target = reliable_line ? Bsp_Ccd_GetTargetIndex() : -1;
+            g_line_error = reliable_line ? line_error : 0;
+            g_line_error_delta = 0;
+            g_line_correction = 0.0f;
+
+            if (reliable_line != 0U) {
+                if (g_square_turn_line_stable_count < APP_SQUARE_TURN_LINE_LOOPS) {
+                    g_square_turn_line_stable_count++;
+                }
+            } else {
+                g_square_turn_line_stable_count = 0U;
+            }
+
+            if (g_square_turn_line_stable_count >= APP_SQUARE_TURN_LINE_LOOPS) {
+                g_square_turn_line_found = 1U;
+                Bsp_Motor_SpeedPidStop();
+                App_UpdateSpeedWatch();
+                g_line_left_cmd = 0.0f;
+                g_line_right_cmd = 0.0f;
+                App_SquareSetState(APP_SQUARE_STATE_BRAKE_AFTER_TURN);
+                return;
+            }
+
+            active_target_cm = g_square_turn_target_cm;
+            g_square_turn_left_done =
+                (g_square_turn_left_cm >= active_target_cm) ? 1U : 0U;
+            g_square_turn_right_done =
+                (g_square_turn_right_cm >= active_target_cm) ? 1U : 0U;
+        }
 
         if ((g_square_turn_left_done != 0U) &&
             (g_square_turn_right_done != 0U)) {
             Bsp_Motor_SpeedPidStop();
             App_UpdateSpeedWatch();
+            g_line_left_cmd = 0.0f;
+            g_line_right_cmd = 0.0f;
             App_SquareSetState(APP_SQUARE_STATE_BRAKE_AFTER_TURN);
             return;
         }
 
-        turn_speed_cm_s = App_LineReferenceToCmS(APP_SQUARE_TURN_SPEED_REFERENCE);
+        if (g_square_turn_phase == APP_SQUARE_TURN_PHASE_COARSE) {
+            turn_reference = APP_SQUARE_TURN_SPEED_REFERENCE;
+        } else {
+            turn_reference = APP_SQUARE_TURN_FINE_SPEED_REFERENCE;
+            if (g_square_turn_fine_start_count < APP_SQUARE_TURN_FINE_START_LOOPS) {
+                if (turn_reference < APP_SQUARE_TURN_FINE_START_MIN_REFERENCE) {
+                    turn_reference = APP_SQUARE_TURN_FINE_START_MIN_REFERENCE;
+                }
+                g_square_turn_fine_start_count++;
+            }
+        }
+        turn_speed_cm_s = App_LineReferenceToCmS(turn_reference);
         left_target_cm_s = (g_square_turn_left_done != 0U) ? 0.0f :
                            ((float) g_square_turn_direction * turn_speed_cm_s);
         right_target_cm_s = (g_square_turn_right_done != 0U) ? 0.0f :
@@ -1055,6 +1160,10 @@ static void App_SquareRouteTask(void)
         Bsp_Motor_SetSpeedTargets(left_target_cm_s, right_target_cm_s);
         Bsp_Motor_SpeedPidUpdate();
         App_UpdateSpeedWatch();
+        g_line_left_cmd = (g_square_turn_left_done != 0U) ? 0.0f :
+                          ((float) g_square_turn_direction * turn_reference);
+        g_line_right_cmd = (g_square_turn_right_done != 0U) ? 0.0f :
+                           (-(float) g_square_turn_direction * turn_reference);
         g_square_turn_loop_count++;
 
         if (Bsp_Motor_GetSpeedFaults() != 0U) {
