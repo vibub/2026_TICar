@@ -54,25 +54,33 @@
 #define APP_LINE_LOST_TURN 0.040f
 
 /*
- * 方形赛道允许更长的丢线搜索，并用独立直角状态机处理黑线中心消失。
- * 所有 *_LOOPS 均以 20 ms 快速任务周期计数。
+ * 方形路线由 CCD 负责直线纠偏、编码器负责边长和 90°差动转向。
+ * 路线持续循环；全部等待均为非阻塞毫秒时序，TURN 超时以 20 ms 控制周期计数。
  */
 #define APP_SQUARE_LOST_RECOVER_MAX 14U
 #define APP_SQUARE_LOST_SPEED_SCALE 0.45f
 #define APP_SQUARE_LOST_TURN 0.060f
-#define APP_SQUARE_CORNER_STATE_TRACK 0U
-#define APP_SQUARE_CORNER_STATE_BRAKE 1U
-#define APP_SQUARE_CORNER_STATE_PIVOT 2U
-#define APP_SQUARE_CORNER_STATE_FAULT 3U
-#define APP_SQUARE_CORNER_ARM_LOOPS 5U
-#define APP_SQUARE_CORNER_ENTER_ERROR 32
-#define APP_SQUARE_CORNER_REACQUIRE_ERROR 8
-#define APP_SQUARE_CORNER_MISSING_LOOPS 6U
-#define APP_SQUARE_CORNER_REACQUIRE_LOOPS 3U
-#define APP_SQUARE_CORNER_BRAKE_LOOPS 5U
-#define APP_SQUARE_CORNER_MAX_PIVOT_LOOPS 90U
-#define APP_SQUARE_CORNER_PIVOT_SPEED 0.16f
-#define APP_SQUARE_CORNER_DEFAULT_DIRECTION (-1)
+#define APP_SQUARE_SIDE_LENGTH_CM 100.0f
+#define APP_SQUARE_SLOWDOWN_START_CM 98.0f
+#define APP_SQUARE_APPROACH_TARGET_CM_S 10.0f
+#define APP_SQUARE_EFFECTIVE_TRACK_CM 15.0f
+#define APP_SQUARE_WAIT_LINE_ERROR 8
+#define APP_SQUARE_WAIT_LINE_LOOPS 3U
+#define APP_SQUARE_BRAKE_AFTER_STRAIGHT_MS 300U
+#define APP_SQUARE_BRAKE_AFTER_TURN_MS 300U
+#define APP_SQUARE_TURN_TIMEOUT_LOOPS 90U
+#define APP_SQUARE_TURN_SPEED_REFERENCE 0.16f
+#define APP_SQUARE_TURN_DIRECTION (-1)
+#define APP_SQUARE_STATE_WAIT_LINE 0U
+#define APP_SQUARE_STATE_STRAIGHT 1U
+#define APP_SQUARE_STATE_BRAKE_AFTER_STRAIGHT 2U
+#define APP_SQUARE_STATE_TURN 3U
+#define APP_SQUARE_STATE_BRAKE_AFTER_TURN 4U
+#define APP_SQUARE_STATE_FAULT 5U
+#define APP_SQUARE_FAULT_NONE 0U
+#define APP_SQUARE_FAULT_SPEED 1U
+#define APP_SQUARE_FAULT_TURN_TIMEOUT 2U
+#define APP_SQUARE_FAULT_INTERNAL_STATE 3U
 /* 速度测试以 20 ms 为一步，循环执行静止、20、30、20 cm/s 四个阶段。 */
 #define APP_SPEED_TEST_LOW_CM_S 20.0f
 #define APP_SPEED_TEST_HIGH_CM_S 30.0f
@@ -182,7 +190,7 @@ static const App_FollowProfile g_circle_follow_profile = {
     APP_LINE_LOST_RECOVER_MAX, APP_LINE_LOST_SPEED_SCALE, APP_LINE_LOST_TURN
 };
 
-/* 方形赛道增加更长的丢线搜索窗口，并由独立直角状态机优先接管。 */
+/* 方形直线段使用更长的丢线搜索窗口；何时转向只由编码器边长状态决定。 */
 static const App_FollowProfile g_square_follow_profile = {
     APP_LINE_BASE_SPEED, APP_LINE_KP, APP_LINE_KD, APP_LINE_STEER_SIGN,
     APP_LINE_STEER_LIMIT, APP_LINE_MEDIUM_ERROR, APP_LINE_LARGE_ERROR,
@@ -319,19 +327,32 @@ static int16_t g_line_last_error;
 static float g_line_last_correction;
 
 /*
- * 方形直角状态：正常巡线、主动制动、原地找线和超时停车锁存。
- * count 是当前状态内的 20 ms 循环数；direction 为 -1 左转、+1 右转。
- * seen_center_line 表示角点检测已完成连续帧武装，其余计数用于丢线和重捕获防抖。
+ * 方形混合路线状态：CCD 只拥有直线段电机控制权，编码器只拥有转向段控制权。
+ * start_count 保存各段编码器起点；距离、边数、圈数和故障量均可在 CCS Watch 中观察。
  */
-volatile uint8_t g_square_corner_state;
-volatile uint32_t g_square_corner_count;
-volatile int8_t g_square_corner_direction;
-volatile uint32_t g_square_corner_entry_count;
-volatile uint32_t g_square_corner_timeout_count;
-volatile uint8_t g_square_seen_center_line;
-volatile uint8_t g_square_center_stable_count;
-volatile uint8_t g_square_center_missing_count;
-volatile uint8_t g_square_reacquire_count;
+volatile uint8_t g_square_route_state;
+volatile uint8_t g_square_fault_reason;
+volatile uint32_t g_square_fault_speed_bits;
+volatile uint32_t g_square_state_start_ms;
+volatile uint32_t g_square_state_elapsed_ms;
+volatile uint8_t g_square_wait_line_stable_count;
+volatile uint8_t g_square_side_index;
+volatile uint32_t g_square_completed_side_count;
+volatile uint32_t g_square_lap_count;
+volatile int32_t g_square_left_start_count;
+volatile int32_t g_square_right_start_count;
+volatile float g_square_straight_left_cm;
+volatile float g_square_straight_right_cm;
+volatile float g_square_straight_center_cm;
+volatile float g_square_straight_output_scale;
+volatile int8_t g_square_turn_direction;
+volatile float g_square_turn_target_cm;
+volatile float g_square_turn_left_cm;
+volatile float g_square_turn_right_cm;
+volatile uint8_t g_square_turn_left_done;
+volatile uint8_t g_square_turn_right_done;
+volatile uint32_t g_square_turn_loop_count;
+volatile uint32_t g_square_turn_timeout_count;
 
 /*
  * 判断周期是否到期。使用 uint32_t 无符号差值可自然跨越毫秒计数回绕；到期后同步更新基准时间。
@@ -433,8 +454,11 @@ static float App_LimitFloatDelta(float value, float last_value, float max_delta)
 /* 将底层速度闭环状态统一镜像到全局量，便于 CCS Watch 同时观察左右轮。 */
 static void App_UpdateSpeedWatch(void)
 {
-    g_encoder_left_count = Bsp_Motor_GetLeftEncoderCount();
-    g_encoder_right_count = Bsp_Motor_GetRightEncoderCount();
+    Bsp_Motor_EncoderSnapshot snapshot;
+
+    Bsp_Motor_GetEncoderSnapshot(&snapshot);
+    g_encoder_left_count = snapshot.left_count;
+    g_encoder_right_count = snapshot.right_count;
     g_encoder_left_speed = Bsp_Motor_GetLeftEncoderSpeed();
     g_encoder_right_speed = Bsp_Motor_GetRightEncoderSpeed();
     g_speed_left_target = Bsp_Motor_GetLeftSpeedTarget();
@@ -450,16 +474,19 @@ static void App_UpdateSpeedWatch(void)
     g_speed_faults = Bsp_Motor_GetSpeedFaults();
 }
 
+static float App_LineReferenceToCmS(float reference)
+{
+    return reference * (APP_LINE_BASE_TARGET_CM_S / APP_LINE_BASE_SPEED);
+}
+
 /*
  * 将巡线层左右比例参考按已验证的直线基准映射为 cm/s，再运行两个独立轮速控制器。
  * 因此 Watch 中的巡线命令、轮速目标和最终 PWM 输出属于三个不同层次。
  */
 static void App_LineApplySpeedPid(float left_reference, float right_reference)
 {
-    const float reference_to_cm_s = APP_LINE_BASE_TARGET_CM_S / APP_LINE_BASE_SPEED;
-
-    Bsp_Motor_SetSpeedTargets(left_reference * reference_to_cm_s,
-                              right_reference * reference_to_cm_s);
+    Bsp_Motor_SetSpeedTargets(App_LineReferenceToCmS(left_reference),
+                              App_LineReferenceToCmS(right_reference));
     Bsp_Motor_SpeedPidUpdate();
     App_UpdateSpeedWatch();
 }
@@ -480,18 +507,32 @@ static void App_ResetLineState(void)
     g_line_last_correction = 0.0f;
 }
 
-/* 清除方形赛道角点阶段、防抖计数和超时锁存，保证模式重入从未武装状态开始。 */
+/* 清除方形路线距离、圈数和故障锁存，模式重入后从停车等待可靠中心线开始。 */
 static void App_ResetSquareState(void)
 {
-    g_square_corner_state = APP_SQUARE_CORNER_STATE_TRACK;
-    g_square_corner_count = 0U;
-    g_square_corner_direction = 0;
-    g_square_corner_entry_count = 0U;
-    g_square_corner_timeout_count = 0U;
-    g_square_seen_center_line = 0U;
-    g_square_center_stable_count = 0U;
-    g_square_center_missing_count = 0U;
-    g_square_reacquire_count = 0U;
+    g_square_route_state = APP_SQUARE_STATE_WAIT_LINE;
+    g_square_fault_reason = APP_SQUARE_FAULT_NONE;
+    g_square_fault_speed_bits = 0U;
+    g_square_state_start_ms = Bsp_Time_GetMilliseconds();
+    g_square_state_elapsed_ms = 0U;
+    g_square_wait_line_stable_count = 0U;
+    g_square_side_index = 0U;
+    g_square_completed_side_count = 0U;
+    g_square_lap_count = 0U;
+    g_square_left_start_count = 0;
+    g_square_right_start_count = 0;
+    g_square_straight_left_cm = 0.0f;
+    g_square_straight_right_cm = 0.0f;
+    g_square_straight_center_cm = 0.0f;
+    g_square_straight_output_scale = 0.0f;
+    g_square_turn_direction = APP_SQUARE_TURN_DIRECTION;
+    g_square_turn_target_cm = 3.14159265f * APP_SQUARE_EFFECTIVE_TRACK_CM / 4.0f;
+    g_square_turn_left_cm = 0.0f;
+    g_square_turn_right_cm = 0.0f;
+    g_square_turn_left_done = 0U;
+    g_square_turn_right_done = 0U;
+    g_square_turn_loop_count = 0U;
+    g_square_turn_timeout_count = 0U;
 }
 
 /*
@@ -805,157 +846,257 @@ static void App_K230Follow_Task(void)
     App_K230Follow_ProcessFrame(&frame);
 }
 
-/*
- * 方形赛道直角状态机：
- * 正常巡线需要连续可靠中心帧完成武装，随后连续丢线才进入主动制动和固定方向原地转向。
- * 重捕获同样采用连续帧确认；超过最大转向周期后锁存停车，避免条件未清除时反复原地打转。
- * black_width==0 的弱边沿桥接帧不能用于武装或重捕获，但仍可由通用巡线维持短时连续性。
- *
- * @return 1 表示本周期由角点状态机接管电机；0 表示继续执行通用巡线。
- */
-static uint8_t App_SquareCornerTask(void)
+static uint8_t App_FollowTask(const App_FollowProfile *profile, float output_scale);
+
+/* 将一帧 CCD 质量和边沿信息镜像到巡线 Watch，不在此函数中驱动电机。 */
+static void App_UpdateLineSensorWatch(void)
 {
-    uint8_t line_valid = Bsp_Ccd_IsLineValid();
-    int16_t line_error = Bsp_Ccd_GetLineError();
-    int16_t abs_error = (line_error < 0) ? (int16_t) (-line_error) : line_error;
-    uint16_t black_width = Bsp_Ccd_GetBlackWidth();
-    uint8_t center_detected = ((line_valid != 0U) && (black_width != 0U) &&
-                               (abs_error < APP_SQUARE_CORNER_ENTER_ERROR)) ? 1U : 0U;
-    uint8_t center_reacquired = ((line_valid != 0U) && (black_width != 0U) &&
-                                 (abs_error <= APP_SQUARE_CORNER_REACQUIRE_ERROR)) ? 1U : 0U;
+    g_line_raw_min = Bsp_Ccd_GetRawMin();
+    g_line_raw_max = Bsp_Ccd_GetRawMax();
+    g_line_raw_min_index = Bsp_Ccd_GetRawMinIndex();
+    g_line_raw_max_index = Bsp_Ccd_GetRawMaxIndex();
+    g_line_contrast = Bsp_Ccd_GetContrast();
+    g_line_dx_max = Bsp_Ccd_GetDxMax();
+    g_line_dx_min = Bsp_Ccd_GetDxMin();
+    g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex();
+    g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex();
+}
 
-    if (g_square_corner_state == APP_SQUARE_CORNER_STATE_TRACK) {
-        if (g_square_seen_center_line == 0U) {
-            g_square_center_missing_count = 0U;
-            if (center_detected != 0U) {
-                if (g_square_center_stable_count < APP_SQUARE_CORNER_ARM_LOOPS) {
-                    g_square_center_stable_count++;
-                }
-                if (g_square_center_stable_count >= APP_SQUARE_CORNER_ARM_LOOPS) {
-                    g_square_seen_center_line = 1U;
-                }
-            } else {
-                g_square_center_stable_count = 0U;
-            }
-            return 0U;
-        }
+static uint32_t App_EncoderAbsDelta(int32_t current, int32_t start)
+{
+    int32_t delta = current - start;
 
-        if (center_detected != 0U) {
-            g_square_center_missing_count = 0U;
-        } else if (g_square_center_missing_count < APP_SQUARE_CORNER_MISSING_LOOPS) {
-            g_square_center_missing_count++;
-        }
+    return (delta < 0) ? (uint32_t) (-delta) : (uint32_t) delta;
+}
 
-        if (g_square_center_missing_count < APP_SQUARE_CORNER_MISSING_LOOPS) {
-            return 0U;
-        }
+static void App_SquareSetState(uint8_t state)
+{
+    g_square_route_state = state;
+    g_square_state_start_ms = Bsp_Time_GetMilliseconds();
+    g_square_state_elapsed_ms = 0U;
+}
 
-        g_square_corner_state = APP_SQUARE_CORNER_STATE_BRAKE;
-        g_square_corner_count = 0U;
-        g_square_corner_direction = APP_SQUARE_CORNER_DEFAULT_DIRECTION;
-        g_square_corner_entry_count++;
-        g_square_seen_center_line = 0U;
-        g_square_center_stable_count = 0U;
-        g_square_center_missing_count = 0U;
-        g_square_reacquire_count = 0U;
-        Bsp_Motor_SpeedPidStop();
-        g_line_last_correction = 0.0f;
-        g_line_left_cmd = 0.0f;
-        g_line_right_cmd = 0.0f;
-        g_line_correction = 0.0f;
-        g_line_valid = line_valid;
-        g_line_target = line_valid ? Bsp_Ccd_GetTargetIndex() : -1;
-        g_line_error = line_valid ? line_error : g_line_last_error;
-        g_line_error_delta = 0;
-        return 1U;
+static void App_SquareEnterFault(uint8_t reason)
+{
+    if (g_square_route_state == APP_SQUARE_STATE_FAULT) {
+        return;
     }
 
-    if (g_square_corner_state == APP_SQUARE_CORNER_STATE_FAULT) {
-        Bsp_Motor_SpeedPidStop();
-        g_line_left_cmd = 0.0f;
-        g_line_right_cmd = 0.0f;
-        g_line_correction = 0.0f;
-        g_line_valid = line_valid;
-        g_line_target = line_valid ? Bsp_Ccd_GetTargetIndex() : -1;
-        g_line_error = line_valid ? line_error : g_line_last_error;
-        g_line_error_delta = 0;
-        return 1U;
-    }
-
-    if (center_reacquired != 0U) {
-        if (g_square_reacquire_count < APP_SQUARE_CORNER_REACQUIRE_LOOPS) {
-            g_square_reacquire_count++;
-        }
-    } else {
-        g_square_reacquire_count = 0U;
-    }
-
-    if (g_square_reacquire_count >= APP_SQUARE_CORNER_REACQUIRE_LOOPS) {
-        g_square_corner_state = APP_SQUARE_CORNER_STATE_TRACK;
-        g_square_corner_count = 0U;
-        g_square_seen_center_line = 0U;
-        g_square_center_stable_count = 0U;
-        g_square_center_missing_count = 0U;
-        g_square_reacquire_count = 0U;
-        g_line_lost_count = 0U;
-        g_line_last_error = line_error;
-        g_line_last_correction = 0.0f;
-        return 0U;
-    }
-
-    if (g_square_corner_state == APP_SQUARE_CORNER_STATE_BRAKE) {
-        Bsp_Motor_SpeedPidStop();
-        g_square_corner_count++;
-        if (g_square_corner_count >= APP_SQUARE_CORNER_BRAKE_LOOPS) {
-            g_square_corner_state = APP_SQUARE_CORNER_STATE_PIVOT;
-            g_square_corner_count = 0U;
-        }
-        g_line_left_cmd = 0.0f;
-        g_line_right_cmd = 0.0f;
-    } else if (g_square_corner_state == APP_SQUARE_CORNER_STATE_PIVOT) {
-        float pivot = APP_SQUARE_CORNER_PIVOT_SPEED *
-                      (float) g_square_corner_direction;
-
-        App_LineApplySpeedPid(pivot, -pivot);
-        g_line_left_cmd = pivot;
-        g_line_right_cmd = -pivot;
-        g_square_corner_count++;
-        if (g_square_corner_count >= APP_SQUARE_CORNER_MAX_PIVOT_LOOPS) {
-            Bsp_Motor_SpeedPidStop();
-            g_square_corner_state = APP_SQUARE_CORNER_STATE_FAULT;
-            g_square_corner_count = 0U;
-            g_square_corner_timeout_count++;
-            g_square_seen_center_line = 0U;
-            g_square_center_stable_count = 0U;
-            g_square_center_missing_count = 0U;
-            g_square_reacquire_count = 0U;
-            g_line_last_correction = 0.0f;
-            g_line_left_cmd = 0.0f;
-            g_line_right_cmd = 0.0f;
-        }
-    } else {
-        Bsp_Motor_SpeedPidStop();
-        g_square_corner_state = APP_SQUARE_CORNER_STATE_FAULT;
-        g_square_corner_count = 0U;
-        g_line_left_cmd = 0.0f;
-        g_line_right_cmd = 0.0f;
-    }
-
-    g_line_valid = line_valid;
-    g_line_target = line_valid ? Bsp_Ccd_GetTargetIndex() : -1;
-    g_line_error = line_valid ? line_error : g_line_last_error;
-    g_line_error_delta = 0;
+    g_square_fault_reason = reason;
+    g_square_fault_speed_bits = Bsp_Motor_GetSpeedFaults();
+    Bsp_Motor_SpeedPidStop();
+    App_UpdateSpeedWatch();
     g_line_correction = 0.0f;
-    return 1U;
+    g_line_left_cmd = 0.0f;
+    g_line_right_cmd = 0.0f;
+    g_square_straight_output_scale = 0.0f;
+    App_SquareSetState(APP_SQUARE_STATE_FAULT);
+}
+
+static void App_SquareEnterWaitLine(void)
+{
+    Bsp_Motor_SpeedPidStop();
+    Bsp_Ccd_ResetState();
+    App_ResetLineState();
+    g_square_wait_line_stable_count = 0U;
+    g_square_straight_output_scale = 0.0f;
+    App_SquareSetState(APP_SQUARE_STATE_WAIT_LINE);
+    g_mode_last_task_ms = Bsp_Time_GetMilliseconds() - APP_LOOP_FAST_MS;
 }
 
 /*
- * 通用 20 ms CCD 巡线任务：
- * 1. 采样 CCD 并更新诊断量；方形模式先允许直角状态机接管。
- * 2. 有效线时按像素误差计算 PD 修正，并根据误差分级降速、保证最小转向、限制幅值和变化率。
- * 3. 短时丢线沿最后有效方向低速搜索，超过 profile 规定窗口后主动停车。
+ * 方形混合路线状态机：CCD 只控制直线方向，编码器距离是直线结束和 90°转向结束的唯一依据。
+ * 所有 300 ms 制动均使用毫秒状态等待，主循环始终可以优先处理 TJC STOP 和模式切换。
  */
-static void App_FollowTask(const App_FollowProfile *profile, uint8_t square_mode)
+static void App_SquareRouteTask(void)
+{
+    Bsp_Motor_EncoderSnapshot snapshot;
+    uint32_t now_ms = Bsp_Time_GetMilliseconds();
+
+    g_square_state_elapsed_ms = (uint32_t) (now_ms - g_square_state_start_ms);
+
+    if (g_square_route_state == APP_SQUARE_STATE_WAIT_LINE) {
+        int16_t line_error;
+        int16_t abs_error;
+        uint8_t reliable_line;
+
+        if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
+            return;
+        }
+
+        Bsp_Ccd_ReadFrame();
+        Bsp_Ccd_Process();
+        App_UpdateLineSensorWatch();
+        line_error = Bsp_Ccd_GetLineError();
+        abs_error = (line_error < 0) ? (int16_t) (-line_error) : line_error;
+        reliable_line = ((Bsp_Ccd_IsLineValid() != 0U) &&
+                         (Bsp_Ccd_GetBlackWidth() != 0U) &&
+                         (abs_error <= APP_SQUARE_WAIT_LINE_ERROR)) ? 1U : 0U;
+
+        g_line_valid = reliable_line;
+        g_line_target = reliable_line ? Bsp_Ccd_GetTargetIndex() : -1;
+        g_line_error = reliable_line ? line_error : 0;
+        g_line_error_delta = 0;
+        g_line_correction = 0.0f;
+        g_line_left_cmd = 0.0f;
+        g_line_right_cmd = 0.0f;
+
+        if (reliable_line != 0U) {
+            if (g_square_wait_line_stable_count < APP_SQUARE_WAIT_LINE_LOOPS) {
+                g_square_wait_line_stable_count++;
+            }
+        } else {
+            g_square_wait_line_stable_count = 0U;
+        }
+
+        if (g_square_wait_line_stable_count >= APP_SQUARE_WAIT_LINE_LOOPS) {
+            Bsp_Motor_SpeedPidReset();
+            Bsp_Motor_GetEncoderSnapshot(&snapshot);
+            g_square_left_start_count = snapshot.left_count;
+            g_square_right_start_count = snapshot.right_count;
+            g_square_straight_left_cm = 0.0f;
+            g_square_straight_right_cm = 0.0f;
+            g_square_straight_center_cm = 0.0f;
+            g_square_straight_output_scale = 1.0f;
+            g_line_last_error = line_error;
+            g_line_last_correction = 0.0f;
+            g_line_lost_count = 0U;
+            App_SquareSetState(APP_SQUARE_STATE_STRAIGHT);
+            g_mode_last_task_ms = now_ms - APP_LOOP_FAST_MS;
+        }
+        Bsp_Gpio_ToggleHeartbeat();
+        return;
+    }
+
+    if (g_square_route_state == APP_SQUARE_STATE_STRAIGHT) {
+        uint32_t left_ticks;
+        uint32_t right_ticks;
+
+        Bsp_Motor_GetEncoderSnapshot(&snapshot);
+        left_ticks = App_EncoderAbsDelta(snapshot.left_count, g_square_left_start_count);
+        right_ticks = App_EncoderAbsDelta(snapshot.right_count, g_square_right_start_count);
+        g_square_straight_left_cm = Bsp_Motor_EncoderTicksToCm(left_ticks);
+        g_square_straight_right_cm = Bsp_Motor_EncoderTicksToCm(right_ticks);
+        g_square_straight_center_cm =
+            (g_square_straight_left_cm + g_square_straight_right_cm) * 0.5f;
+
+        if (g_square_straight_center_cm >= APP_SQUARE_SIDE_LENGTH_CM) {
+            Bsp_Motor_SpeedPidStop();
+            App_UpdateSpeedWatch();
+            g_line_correction = 0.0f;
+            g_line_left_cmd = 0.0f;
+            g_line_right_cmd = 0.0f;
+            g_square_straight_output_scale = 0.0f;
+            App_SquareSetState(APP_SQUARE_STATE_BRAKE_AFTER_STRAIGHT);
+            return;
+        }
+
+        g_square_straight_output_scale =
+            (g_square_straight_center_cm >= APP_SQUARE_SLOWDOWN_START_CM) ?
+            (APP_SQUARE_APPROACH_TARGET_CM_S / APP_LINE_BASE_TARGET_CM_S) : 1.0f;
+        if (App_FollowTask(&g_square_follow_profile,
+                           g_square_straight_output_scale) != 0U) {
+            if (Bsp_Motor_GetSpeedFaults() != 0U) {
+                App_SquareEnterFault(APP_SQUARE_FAULT_SPEED);
+            }
+        }
+        return;
+    }
+
+    if (g_square_route_state == APP_SQUARE_STATE_BRAKE_AFTER_STRAIGHT) {
+        if (g_square_state_elapsed_ms >= APP_SQUARE_BRAKE_AFTER_STRAIGHT_MS) {
+            Bsp_Motor_SpeedPidReset();
+            Bsp_Motor_GetEncoderSnapshot(&snapshot);
+            g_square_left_start_count = snapshot.left_count;
+            g_square_right_start_count = snapshot.right_count;
+            g_square_turn_left_cm = 0.0f;
+            g_square_turn_right_cm = 0.0f;
+            g_square_turn_left_done = 0U;
+            g_square_turn_right_done = 0U;
+            g_square_turn_loop_count = 0U;
+            g_square_turn_direction = APP_SQUARE_TURN_DIRECTION;
+            App_SquareSetState(APP_SQUARE_STATE_TURN);
+            g_mode_last_task_ms = now_ms - APP_LOOP_FAST_MS;
+        }
+        return;
+    }
+
+    if (g_square_route_state == APP_SQUARE_STATE_TURN) {
+        float turn_speed_cm_s;
+        float left_target_cm_s;
+        float right_target_cm_s;
+        uint32_t left_ticks;
+        uint32_t right_ticks;
+
+        if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
+            return;
+        }
+
+        Bsp_Motor_GetEncoderSnapshot(&snapshot);
+        left_ticks = App_EncoderAbsDelta(snapshot.left_count, g_square_left_start_count);
+        right_ticks = App_EncoderAbsDelta(snapshot.right_count, g_square_right_start_count);
+        g_square_turn_left_cm = Bsp_Motor_EncoderTicksToCm(left_ticks);
+        g_square_turn_right_cm = Bsp_Motor_EncoderTicksToCm(right_ticks);
+        g_square_turn_left_done =
+            (g_square_turn_left_cm >= g_square_turn_target_cm) ? 1U : 0U;
+        g_square_turn_right_done =
+            (g_square_turn_right_cm >= g_square_turn_target_cm) ? 1U : 0U;
+
+        if ((g_square_turn_left_done != 0U) &&
+            (g_square_turn_right_done != 0U)) {
+            Bsp_Motor_SpeedPidStop();
+            App_UpdateSpeedWatch();
+            App_SquareSetState(APP_SQUARE_STATE_BRAKE_AFTER_TURN);
+            return;
+        }
+
+        turn_speed_cm_s = App_LineReferenceToCmS(APP_SQUARE_TURN_SPEED_REFERENCE);
+        left_target_cm_s = (g_square_turn_left_done != 0U) ? 0.0f :
+                           ((float) g_square_turn_direction * turn_speed_cm_s);
+        right_target_cm_s = (g_square_turn_right_done != 0U) ? 0.0f :
+                            (-(float) g_square_turn_direction * turn_speed_cm_s);
+        Bsp_Motor_SetSpeedTargets(left_target_cm_s, right_target_cm_s);
+        Bsp_Motor_SpeedPidUpdate();
+        App_UpdateSpeedWatch();
+        g_square_turn_loop_count++;
+
+        if (Bsp_Motor_GetSpeedFaults() != 0U) {
+            App_SquareEnterFault(APP_SQUARE_FAULT_SPEED);
+        } else if (g_square_turn_loop_count >= APP_SQUARE_TURN_TIMEOUT_LOOPS) {
+            g_square_turn_timeout_count++;
+            App_SquareEnterFault(APP_SQUARE_FAULT_TURN_TIMEOUT);
+        }
+        Bsp_Gpio_ToggleHeartbeat();
+        return;
+    }
+
+    if (g_square_route_state == APP_SQUARE_STATE_BRAKE_AFTER_TURN) {
+        if (g_square_state_elapsed_ms >= APP_SQUARE_BRAKE_AFTER_TURN_MS) {
+            g_square_completed_side_count++;
+            g_square_side_index++;
+            if (g_square_side_index >= 4U) {
+                g_square_side_index = 0U;
+                g_square_lap_count++;
+            }
+            App_SquareEnterWaitLine();
+        }
+        return;
+    }
+
+    if (g_square_route_state == APP_SQUARE_STATE_FAULT) {
+        return;
+    }
+
+    App_SquareEnterFault(APP_SQUARE_FAULT_INTERNAL_STATE);
+}
+
+/*
+ * 通用 20 ms CCD 巡线任务：有效线按误差进行 PD 差速，短时丢线沿最近方向搜索。
+ * output_scale 同时缩放左右最终参考，供定距方形路线末端低速接近且不改变转向比例。
+ *
+ * @return 1 表示本周期执行了一次 CCD 和速度控制；0 表示控制周期尚未到期。
+ */
+static uint8_t App_FollowTask(const App_FollowProfile *profile, float output_scale)
 {
     int16_t line_error;
     int16_t error_delta;
@@ -968,25 +1109,12 @@ static void App_FollowTask(const App_FollowProfile *profile, uint8_t square_mode
     float right_cmd;
 
     if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
-        return;
+        return 0U;
     }
 
     Bsp_Ccd_ReadFrame();
     Bsp_Ccd_Process();
-    g_line_raw_min = Bsp_Ccd_GetRawMin();
-    g_line_raw_max = Bsp_Ccd_GetRawMax();
-    g_line_raw_min_index = Bsp_Ccd_GetRawMinIndex();
-    g_line_raw_max_index = Bsp_Ccd_GetRawMaxIndex();
-    g_line_contrast = Bsp_Ccd_GetContrast();
-    g_line_dx_max = Bsp_Ccd_GetDxMax();
-    g_line_dx_min = Bsp_Ccd_GetDxMin();
-    g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex();
-    g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex();
-
-    if ((square_mode != 0U) && (App_SquareCornerTask() != 0U)) {
-        Bsp_Gpio_ToggleHeartbeat();
-        return;
-    }
+    App_UpdateLineSensorWatch();
 
     if (Bsp_Ccd_IsLineValid() != 0U) {
         line_error = Bsp_Ccd_GetLineError();
@@ -1029,8 +1157,8 @@ static void App_FollowTask(const App_FollowProfile *profile, uint8_t square_mode
         correction = App_LimitFloat(correction, steer_limit);
         correction = App_LimitFloatDelta(
             correction, g_line_last_correction, APP_LINE_CORRECTION_SLEW_LIMIT);
-        left_cmd = base_speed + correction;
-        right_cmd = base_speed - correction;
+        left_cmd = (base_speed + correction) * output_scale;
+        right_cmd = (base_speed - correction) * output_scale;
         App_LineApplySpeedPid(left_cmd, right_cmd);
 
         g_line_valid = 1U;
@@ -1038,7 +1166,7 @@ static void App_FollowTask(const App_FollowProfile *profile, uint8_t square_mode
         g_line_target = Bsp_Ccd_GetTargetIndex();
         g_line_error = line_error;
         g_line_error_delta = error_delta;
-        g_line_correction = correction;
+        g_line_correction = correction * output_scale;
         g_line_left_cmd = left_cmd;
         g_line_right_cmd = right_cmd;
         g_line_last_error = line_error;
@@ -1047,9 +1175,6 @@ static void App_FollowTask(const App_FollowProfile *profile, uint8_t square_mode
         correction = 0.0f;
         left_cmd = 0.0f;
         right_cmd = 0.0f;
-        if (square_mode != 0U) {
-            g_line_recover_direction = APP_SQUARE_CORNER_DEFAULT_DIRECTION;
-        }
 
         if ((g_line_lost_count < profile->lost_recover_max) &&
             (g_line_recover_direction != 0)) {
@@ -1058,8 +1183,8 @@ static void App_FollowTask(const App_FollowProfile *profile, uint8_t square_mode
                          (float) g_line_recover_direction;
             correction = App_LimitFloatDelta(
                 correction, g_line_last_correction, APP_LINE_CORRECTION_SLEW_LIMIT);
-            left_cmd = base_speed + correction;
-            right_cmd = base_speed - correction;
+            left_cmd = (base_speed + correction) * output_scale;
+            right_cmd = (base_speed - correction) * output_scale;
             App_LineApplySpeedPid(left_cmd, right_cmd);
         } else {
             Bsp_Motor_Stop();
@@ -1070,13 +1195,14 @@ static void App_FollowTask(const App_FollowProfile *profile, uint8_t square_mode
         g_line_target = -1;
         g_line_error = g_line_last_error;
         g_line_error_delta = 0;
-        g_line_correction = correction;
+        g_line_correction = correction * output_scale;
         g_line_left_cmd = left_cmd;
         g_line_right_cmd = right_cmd;
         g_line_last_correction = correction;
     }
 
     Bsp_Gpio_ToggleHeartbeat();
+    return 1U;
 }
 
 /* 基础联调模式：CCD 有效时以固定比例等速直行，无有效线立即主动停车。 */
@@ -1306,12 +1432,10 @@ static uint8_t App_ModeEnter(uint8_t mode)
             return 1U;
         case APP_MODE_SQUARE_FOLLOW:
             App_EnsureCcd();
-            Bsp_Ccd_ResetState(); // 清除历史目标，防止弱边沿帧误触发直角制动和找线。
             App_EnsureSpeedPid();
-            Bsp_Motor_SpeedPidReset();
             Bsp_Motor_EncoderReset();
-            App_ResetLineState();
             App_ResetSquareState();
+            App_SquareEnterWaitLine();
             return 1U;
         default:
             return 0U;
@@ -1369,7 +1493,7 @@ static void App_ModeTask(uint8_t mode)
             break;
         case APP_MODE_LINE_FOLLOW:
             /* 普通赛道 profile + 双轮速度闭环。 */
-            App_FollowTask(&g_line_follow_profile, 0U);
+            (void) App_FollowTask(&g_line_follow_profile, 1.0f);
             break;
         case APP_MODE_CCD_STRAIGHT:
             /* 只用 CCD 有效性控制固定直行/停车，不进行转向反馈。 */
@@ -1392,15 +1516,15 @@ static void App_ModeTask(uint8_t mode)
             break;
         case APP_MODE_CIRCLE_FOLLOW:
             /* 圆形赛道使用独立 profile 入口，便于与普通巡线分开调参。 */
-            App_FollowTask(&g_circle_follow_profile, 0U);
+            (void) App_FollowTask(&g_circle_follow_profile, 1.0f);
             break;
         case APP_MODE_K230_FOLLOW:
             /* 解析 K230 目标并增量更新双轴云台，链路超时后禁用并在新帧到达时恢复 PWM。 */
             App_K230Follow_Task();
             break;
         case APP_MODE_SQUARE_FOLLOW:
-            /* 方形 profile + 直角制动/原地找线状态机。 */
-            App_FollowTask(&g_square_follow_profile, 1U);
+            /* CCD 定距直线 + 编码器 90°差动转向，完成四边后继续下一圈。 */
+            App_SquareRouteTask();
             break;
         default:
             break;
