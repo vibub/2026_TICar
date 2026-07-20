@@ -20,7 +20,7 @@
 /* 边沿总幅度较弱时，可暂时沿用最近可靠中心以保持控制连续性。 */
 #define BSP_CCD_WEAK_EDGE_DELTA 25
 #define BSP_CCD_MIN_BLACK_WIDTH 3U
-#define BSP_CCD_IGNORE_EDGE_PIXELS 16U
+#define BSP_CCD_IGNORE_EDGE_PIXELS 0U // CCD左右死区
 /* 自适应阈值位于最暗值到最亮值之间的 45% 位置。 */
 #define BSP_CCD_THRESHOLD_NUMERATOR 45U
 #define BSP_CCD_THRESHOLD_DENOMINATOR 100U
