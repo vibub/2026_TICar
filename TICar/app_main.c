@@ -11,6 +11,7 @@
 #include "app_config.h"
 #include "bsp_ccd.h"
 #include "bsp_gpio.h"
+#include "bsp_imu.h"
 #include "bsp_motor.h"
 #include "bsp_ptz.h"
 #include "bsp_time.h"
@@ -1748,6 +1749,7 @@ void App_Init(void)
 {
     Bsp_Gpio_Init();
     Bsp_Uart_Init();
+    Bsp_Imu_Init();
     Bsp_Time_Init();
     Bsp_Motor_Init();
     Bsp_Motor_Disable();
@@ -1777,6 +1779,8 @@ void App_Init(void)
  */
 void App_Loop(void)
 {
+    /* IMU 始终接收，STOPPED 和各运动模式都能在 CCS Watch 中观察姿态与链路计数。 */
+    Bsp_Imu_Task();
     Protocol_Tjc_Task();
     App_ModeManagerTask();
     if (g_app_switch_state == APP_SWITCH_IDLE) {
