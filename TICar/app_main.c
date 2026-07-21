@@ -20,6 +20,8 @@
 #include "protocol_k230.h"
 #include "protocol_tjc.h"
 
+#define APP_DEBUG_REQUEST_NONE 0xFFU
+
 /* 电机映射测试：用明显不同的左右轮比例观察底盘偏航方向。 */
 #define APP_MOTOR_TEST_SLOW_SPEED 0.18f // 电机映射测试中的低速轮比例参考。
 #define APP_MOTOR_TEST_FAST_SPEED 0.45f // 电机映射测试中的高速轮比例参考。
@@ -222,6 +224,9 @@ volatile uint8_t g_app_requested_mode = APP_MODE_STOPPED;
 volatile uint8_t g_app_switch_state = APP_SWITCH_IDLE;
 volatile uint32_t g_app_mode_switch_count;
 volatile uint32_t g_app_mode_reject_count;
+volatile uint8_t g_app_debug_request_mode = APP_DEBUG_REQUEST_NONE;
+volatile uint8_t g_app_debug_request_result;
+volatile uint32_t g_app_debug_request_count;
 
 /* 切换内部状态：制动起始时间、应答中的原始请求，以及按需初始化标志。 */
 static uint32_t g_app_switch_deadline_ms;
@@ -1816,6 +1821,23 @@ uint8_t App_RequestMode(uint8_t mode)
     return 1U;
 }
 
+/*
+ * CCS Watch one-shot command mailbox. The debugger writes a mode number and
+ * this task submits it through the same guarded switch path as the touchscreen.
+ */
+static void App_DebugRequestTask(void)
+{
+    uint8_t requested_mode = g_app_debug_request_mode;
+
+    if (requested_mode == APP_DEBUG_REQUEST_NONE) {
+        return;
+    }
+
+    g_app_debug_request_mode = APP_DEBUG_REQUEST_NONE;
+    g_app_debug_request_count++;
+    g_app_debug_request_result = App_RequestMode(requested_mode);
+}
+
 uint8_t App_GetCurrentMode(void)
 {
     return g_app_current_mode;
@@ -1845,6 +1867,9 @@ void App_Init(void)
     g_app_switch_state = APP_SWITCH_IDLE;
     g_app_mode_switch_count = 0U;
     g_app_mode_reject_count = 0U;
+    g_app_debug_request_mode = APP_DEBUG_REQUEST_NONE;
+    g_app_debug_request_result = 0U;
+    g_app_debug_request_count = 0U;
     g_ccd_initialized = 0U;
     g_encoder_initialized = 0U;
     g_speed_pid_initialized = 0U;
@@ -1861,6 +1886,7 @@ void App_Loop(void)
 {
     /* IMU 始终接收，STOPPED 和各运动模式都能在 CCS Watch 中观察姿态与链路计数。 */
     Bsp_Imu_Task();
+    App_DebugRequestTask();
     Protocol_Tjc_Task();
     App_ModeManagerTask();
     if (g_app_switch_state == APP_SWITCH_IDLE) {

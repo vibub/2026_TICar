@@ -104,3 +104,23 @@ With the verified sensor sign, a right yaw disturbance is negative. The
 controller responds by slowing the left wheel and speeding the right wheel to
 steer back left. First verify that response with the drive wheels lifted; stop
 immediately if the correction direction is reversed.
+
+### Entering mode 8 without the touchscreen
+
+The firmware exposes a one-shot CCS Watch command mailbox. Add these variables:
+
+- `g_app_debug_request_mode`: write a mode number here.
+- `g_app_debug_request_result`: 1 means the request was accepted.
+- `g_app_debug_request_count`: increments once per consumed command.
+- `g_app_current_mode`: becomes 8 after the guarded switch completes.
+- `g_app_switch_state`: 0 means the switch manager is idle.
+
+To enter the test, halt the CPU, set `g_app_debug_request_mode` to 8, then
+resume. The firmware immediately restores the mailbox to 255 and performs the
+same initialization and braking sequence used by the touchscreen. To stop,
+halt the CPU, set the mailbox to 0, and resume.
+
+Do not edit `g_app_current_mode` or `g_app_debug_mode` in Watch. They are status
+variables, and forcing either one bypasses or fails to invoke the normal mode
+transition. Begin with the drive wheels lifted and a valid black line under the
+CCD because mode 8 still uses the CCD as its run/stop gate.
