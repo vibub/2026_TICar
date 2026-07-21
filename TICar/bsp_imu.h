@@ -34,9 +34,16 @@ extern volatile uint16_t g_imu_calibration_sample_count;
 extern volatile uint32_t g_imu_sflp_count;
 extern volatile uint32_t g_imu_fifo_overrun_count;
 extern volatile float g_imu_gyro_bias_dps[3];
+extern volatile float g_imu_yaw_zero_deg;
+extern volatile float g_imu_heading_deg;
+extern volatile uint8_t g_imu_heading_ready;
+extern volatile uint32_t g_imu_heading_zero_count;
 
 void Bsp_Imu_Init(void);
 void Bsp_Imu_Task(void);
 uint8_t Bsp_Imu_IsHardwareReady(void);
+uint8_t Bsp_Imu_ZeroYaw(void);
+uint8_t Bsp_Imu_IsHeadingReady(void);
+float Bsp_Imu_GetHeadingDeg(void);
 
 #endif

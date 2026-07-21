@@ -66,10 +66,33 @@ volatile uint16_t g_imu_calibration_sample_count;
 volatile uint32_t g_imu_sflp_count;
 volatile uint32_t g_imu_fifo_overrun_count;
 volatile float g_imu_gyro_bias_dps[3];
+volatile float g_imu_yaw_zero_deg;
+volatile float g_imu_heading_deg;
+volatile uint8_t g_imu_heading_ready;
+volatile uint32_t g_imu_heading_zero_count;
 
 #if defined(I2C_LSM6DSV16X_INST)
 static uint32_t g_imu_last_poll_ms;
 static float g_imu_gyro_bias_sum[3];
+
+static float Bsp_Imu_WrapAngleDeg(float angle_deg)
+{
+    while (angle_deg > 180.0f) {
+        angle_deg -= 360.0f;
+    }
+    while (angle_deg < -180.0f) {
+        angle_deg += 360.0f;
+    }
+    return angle_deg;
+}
+
+static void Bsp_Imu_ApplyCurrentYawZero(void)
+{
+    g_imu_yaw_zero_deg = g_imu.euler_deg[2];
+    g_imu_heading_deg = 0.0f;
+    g_imu_heading_ready = 1U;
+    g_imu_heading_zero_count++;
+}
 
 static int16_t Bsp_Imu_ReadI16(const uint8_t *data)
 {
@@ -154,6 +177,14 @@ static void Bsp_Imu_UpdateEulerFromSflp(const uint8_t *data)
                 g_imu.quat[0] * g_imu.quat[1]),
         1.0f - 2.0f * (g_imu.quat[1] * g_imu.quat[1] +
                        g_imu.quat[2] * g_imu.quat[2])) * BSP_IMU_RAD_TO_DEG;
+
+    if ((g_imu_calibration_status == BSP_IMU_CALIBRATED) &&
+        (g_imu_heading_ready == 0U)) {
+        Bsp_Imu_ApplyCurrentYawZero();
+    } else if (g_imu_heading_ready != 0U) {
+        g_imu_heading_deg = Bsp_Imu_WrapAngleDeg(
+            g_imu.euler_deg[2] - g_imu_yaw_zero_deg);
+    }
 
     g_imu_sflp_count++;
     g_imu.data_frame_count++;
@@ -431,6 +462,10 @@ void Bsp_Imu_Init(void)
     g_imu_gyro_bias_dps[0] = 0.0f;
     g_imu_gyro_bias_dps[1] = 0.0f;
     g_imu_gyro_bias_dps[2] = 0.0f;
+    g_imu_yaw_zero_deg = 0.0f;
+    g_imu_heading_deg = 0.0f;
+    g_imu_heading_ready = 0U;
+    g_imu_heading_zero_count = 0U;
 
 #if defined(I2C_LSM6DSV16X_INST)
     g_imu_gyro_bias_sum[0] = 0.0f;
@@ -521,4 +556,28 @@ void Bsp_Imu_Task(void)
 uint8_t Bsp_Imu_IsHardwareReady(void)
 {
     return g_imu.hardware_ready;
+}
+
+uint8_t Bsp_Imu_ZeroYaw(void)
+{
+#if defined(I2C_LSM6DSV16X_INST)
+    if ((g_imu_calibration_status != BSP_IMU_CALIBRATED) ||
+        (g_imu_sflp_count == 0U)) {
+        return 0U;
+    }
+    Bsp_Imu_ApplyCurrentYawZero();
+    return 1U;
+#else
+    return 0U;
+#endif
+}
+
+uint8_t Bsp_Imu_IsHeadingReady(void)
+{
+    return g_imu_heading_ready;
+}
+
+float Bsp_Imu_GetHeadingDeg(void)
+{
+    return g_imu_heading_deg;
 }

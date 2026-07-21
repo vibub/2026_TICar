@@ -54,6 +54,11 @@ Add these global variables:
 - `g_imu.gyro_dps[0]`, `[1]`, `[2]`: angular rate in degrees per second.
 - `g_imu.quat[0..3]`: SFLP quaternion in x, y, z, w order.
 - `g_imu.euler_deg[0..2]`: roll, pitch and relative yaw in degrees.
+- `g_imu_heading_ready`: changes to 1 after calibration and automatic yaw zero.
+- `g_imu_yaw_zero_deg`: raw SFLP yaw captured as the current forward direction.
+- `g_imu_heading_deg`: zero-referenced heading wrapped to -180..+180 degrees.
+- `g_imu_heading_zero_count`: 1 after automatic zero; increases after each
+  successful manual `Bsp_Imu_ZeroYaw()` call.
 
 Initialization status values:
 
@@ -72,3 +77,9 @@ Keep the vehicle completely still for about three seconds after every reset.
 Calibration restarts whenever any raw gyro axis exceeds 5 dps. SFLP is a six-axis
 game rotation vector: roll and pitch are gravity referenced, but yaw is relative
 and will drift slowly because this module has no magnetometer.
+
+After gyro calibration finishes, the next SFLP sample is automatically captured
+as heading zero. Control code should first check `Bsp_Imu_IsHeadingReady()` and
+then read `Bsp_Imu_GetHeadingDeg()`. Call `Bsp_Imu_ZeroYaw()` while stopped to
+redefine the current vehicle direction as zero; it returns 0 before calibration
+or before the first SFLP sample is available.
