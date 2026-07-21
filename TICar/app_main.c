@@ -48,6 +48,12 @@
 #define APP_LINE_STEER_SIGN 1.0f // CCD 误差到左右轮差速方向的符号，方向相反时改为 -1.0f。
 /* CCD 直行模式只做有效性门控，不使用中心误差进行转向。 */
 #define APP_CCD_STRAIGHT_SPEED 0.16f // 模式 8 检测到有效黑线时的固定直行比例参考。
+#define APP_IMU_HEADING_KP 0.0030f
+#define APP_IMU_HEADING_KD 0.0015f
+#define APP_IMU_HEADING_DEADBAND_DEG 0.5f
+#define APP_IMU_HEADING_CORRECTION_LIMIT 0.08f
+#define APP_IMU_HEADING_CORRECTION_SLEW 0.02f
+#define APP_IMU_HEADING_MAX_AGE_MS 100U
 
 /* 普通/圆形巡线允许短时沿最后一次有效方向低速搜索，超过窗口后主动停车。 */
 #define APP_LINE_LOST_RECOVER_MAX 8U // 普通和圆形巡线丢线后继续搜索的最大 20 ms 周期数。
@@ -332,6 +338,17 @@ volatile int8_t g_line_recover_direction;
 static int16_t g_line_last_error;
 static float g_line_last_correction;
 
+/* 模式 8 的 IMU 航向保持；传感器坐标约定为左转正、右转负。 */
+volatile uint8_t g_imu_heading_hold_active;
+volatile uint32_t g_imu_heading_hold_stale_count;
+volatile float g_imu_heading_target_deg;
+volatile float g_imu_heading_error_deg;
+volatile float g_imu_heading_correction;
+volatile float g_imu_heading_left_cmd;
+volatile float g_imu_heading_right_cmd;
+static float g_imu_heading_last_error_deg;
+static float g_imu_heading_last_correction;
+
 /*
  * 方形混合路线状态：CCD 只拥有直线段电机控制权，编码器只拥有转向段控制权。
  * start_count 保存各段编码器起点；距离、边数、圈数和故障量均可在 CCS Watch 中观察。
@@ -516,6 +533,19 @@ static void App_ResetLineState(void)
     g_line_recover_direction = 0;
     g_line_last_error = 0;
     g_line_last_correction = 0.0f;
+}
+
+static void App_ResetImuHeadingHold(void)
+{
+    g_imu_heading_hold_active = 0U;
+    g_imu_heading_hold_stale_count = 0U;
+    g_imu_heading_target_deg = 0.0f;
+    g_imu_heading_error_deg = 0.0f;
+    g_imu_heading_correction = 0.0f;
+    g_imu_heading_left_cmd = 0.0f;
+    g_imu_heading_right_cmd = 0.0f;
+    g_imu_heading_last_error_deg = 0.0f;
+    g_imu_heading_last_correction = 0.0f;
 }
 
 /* 清除方形路线距离、圈数和故障锁存，模式重入后从停车等待可靠中心线开始。 */
@@ -1311,32 +1341,78 @@ static uint8_t App_FollowTask(const App_FollowProfile *profile, float output_sca
 /* 基础联调模式：CCD 有效时以固定比例等速直行，无有效线立即主动停车。 */
 static void App_CcdStraightTask(void)
 {
+    float heading_error;
+    float correction;
+    float left_cmd;
+    float right_cmd;
+
     if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
         return;
     }
 
     Bsp_Ccd_ReadFrame();
     Bsp_Ccd_Process();
-    if (Bsp_Ccd_IsLineValid() != 0U) {
-        Bsp_Motor_Set(APP_CCD_STRAIGHT_SPEED, APP_CCD_STRAIGHT_SPEED);
+    if ((Bsp_Ccd_IsLineValid() != 0U) &&
+        (Bsp_Imu_IsHeadingFresh(APP_IMU_HEADING_MAX_AGE_MS) != 0U)) {
+        if (g_imu_heading_hold_active == 0U) {
+            g_imu_heading_hold_active = Bsp_Imu_ZeroYaw();
+            g_imu_heading_last_error_deg = 0.0f;
+            g_imu_heading_last_correction = 0.0f;
+        }
+
+        heading_error = g_imu_heading_target_deg - Bsp_Imu_GetHeadingDeg();
+        if ((heading_error > -APP_IMU_HEADING_DEADBAND_DEG) &&
+            (heading_error < APP_IMU_HEADING_DEADBAND_DEG)) {
+            heading_error = 0.0f;
+        }
+        correction = APP_IMU_HEADING_KP * heading_error +
+            APP_IMU_HEADING_KD *
+                (heading_error - g_imu_heading_last_error_deg);
+        correction = App_LimitFloat(correction,
+            APP_IMU_HEADING_CORRECTION_LIMIT);
+        correction = App_LimitFloatDelta(correction,
+            g_imu_heading_last_correction,
+            APP_IMU_HEADING_CORRECTION_SLEW);
+
+        /* 右偏时 heading 为负，左轮减速、右轮加速，使车辆向左纠偏。 */
+        left_cmd = APP_CCD_STRAIGHT_SPEED - correction;
+        right_cmd = APP_CCD_STRAIGHT_SPEED + correction;
+        Bsp_Motor_Set(left_cmd, right_cmd);
         g_line_valid = 1U;
         g_line_target = Bsp_Ccd_GetTargetIndex();
         g_line_error = Bsp_Ccd_GetLineError();
-        g_line_left_cmd = APP_CCD_STRAIGHT_SPEED;
-        g_line_right_cmd = APP_CCD_STRAIGHT_SPEED;
+        g_line_left_cmd = left_cmd;
+        g_line_right_cmd = right_cmd;
+        g_line_correction = correction;
+        g_imu_heading_error_deg = heading_error;
+        g_imu_heading_correction = correction;
+        g_imu_heading_left_cmd = left_cmd;
+        g_imu_heading_right_cmd = right_cmd;
+        g_imu_heading_last_error_deg = heading_error;
+        g_imu_heading_last_correction = correction;
     } else {
         Bsp_Motor_Stop();
+        if (Bsp_Imu_IsHeadingFresh(APP_IMU_HEADING_MAX_AGE_MS) == 0U) {
+            g_imu_heading_hold_active = 0U;
+            g_imu_heading_hold_stale_count++;
+        }
         g_line_valid = 0U;
         g_line_target = -1;
         g_line_error = 0;
         g_line_left_cmd = 0.0f;
         g_line_right_cmd = 0.0f;
+        g_line_correction = 0.0f;
+        g_imu_heading_error_deg = 0.0f;
+        g_imu_heading_correction = 0.0f;
+        g_imu_heading_left_cmd = 0.0f;
+        g_imu_heading_right_cmd = 0.0f;
+        g_imu_heading_last_error_deg = 0.0f;
+        g_imu_heading_last_correction = 0.0f;
     }
     g_line_dx_max = Bsp_Ccd_GetDxMax();
     g_line_dx_min = Bsp_Ccd_GetDxMin();
     g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex();
     g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex();
-    g_line_correction = 0.0f;
     Bsp_Gpio_ToggleHeartbeat();
 }
 
@@ -1496,6 +1572,10 @@ static uint8_t App_ModeEnter(uint8_t mode)
             App_EnsureCcd();
             Bsp_Ccd_ResetState(); // 直行判断必须从新帧开始，不能沿用最近有效黑线。
             App_ResetLineState();
+            App_ResetImuHeadingHold();
+            if (Bsp_Imu_IsHeadingFresh(APP_IMU_HEADING_MAX_AGE_MS) != 0U) {
+                g_imu_heading_hold_active = Bsp_Imu_ZeroYaw();
+            }
             return 1U;
         case APP_MODE_ENCODER_WATCH:
             App_EnsureEncoder();

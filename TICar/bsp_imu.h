@@ -38,6 +38,7 @@ extern volatile float g_imu_yaw_zero_deg;
 extern volatile float g_imu_heading_deg;
 extern volatile uint8_t g_imu_heading_ready;
 extern volatile uint32_t g_imu_heading_zero_count;
+extern volatile uint32_t g_imu_last_sflp_ms;
 
 void Bsp_Imu_Init(void);
 void Bsp_Imu_Task(void);
@@ -45,5 +46,6 @@ uint8_t Bsp_Imu_IsHardwareReady(void);
 uint8_t Bsp_Imu_ZeroYaw(void);
 uint8_t Bsp_Imu_IsHeadingReady(void);
 float Bsp_Imu_GetHeadingDeg(void);
+uint8_t Bsp_Imu_IsHeadingFresh(uint32_t max_age_ms);
 
 #endif

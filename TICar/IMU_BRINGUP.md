@@ -83,3 +83,24 @@ as heading zero. Control code should first check `Bsp_Imu_IsHeadingReady()` and
 then read `Bsp_Imu_GetHeadingDeg()`. Call `Bsp_Imu_ZeroYaw()` while stopped to
 redefine the current vehicle direction as zero; it returns 0 before calibration
 or before the first SFLP sample is available.
+
+## Low-speed heading-hold test (mode 8)
+
+After rigidly mounting the IMU, mode 8 uses the CCD only as a run/stop gate and
+uses IMU heading to keep the vehicle straight at a low PWM reference. Entering
+the mode captures a fresh yaw zero. The motor is stopped immediately if the line
+is invalid or SFLP heading is older than 100 ms.
+
+Watch these variables during the first wheels-off-ground test:
+
+- `g_imu_heading_hold_active`: must be 1 before the motors run.
+- `g_imu_heading_target_deg`: remains 0 for this test.
+- `g_imu_heading_error_deg`: target minus measured heading.
+- `g_imu_heading_correction`: limited to +/-0.08.
+- `g_imu_heading_left_cmd`, `g_imu_heading_right_cmd`: final logical wheel commands.
+- `g_imu_heading_hold_stale_count`: must remain unchanged while data is healthy.
+
+With the verified sensor sign, a right yaw disturbance is negative. The
+controller responds by slowing the left wheel and speeding the right wheel to
+steer back left. First verify that response with the drive wheels lifted; stop
+immediately if the correction direction is reversed.

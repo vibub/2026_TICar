@@ -70,6 +70,7 @@ volatile float g_imu_yaw_zero_deg;
 volatile float g_imu_heading_deg;
 volatile uint8_t g_imu_heading_ready;
 volatile uint32_t g_imu_heading_zero_count;
+volatile uint32_t g_imu_last_sflp_ms;
 
 #if defined(I2C_LSM6DSV16X_INST)
 static uint32_t g_imu_last_poll_ms;
@@ -187,6 +188,7 @@ static void Bsp_Imu_UpdateEulerFromSflp(const uint8_t *data)
     }
 
     g_imu_sflp_count++;
+    g_imu_last_sflp_ms = Bsp_Time_GetMilliseconds();
     g_imu.data_frame_count++;
     g_imu.valid_frame_count++;
     g_imu.frame_updated = 1U;
@@ -466,6 +468,7 @@ void Bsp_Imu_Init(void)
     g_imu_heading_deg = 0.0f;
     g_imu_heading_ready = 0U;
     g_imu_heading_zero_count = 0U;
+    g_imu_last_sflp_ms = 0U;
 
 #if defined(I2C_LSM6DSV16X_INST)
     g_imu_gyro_bias_sum[0] = 0.0f;
@@ -580,4 +583,13 @@ uint8_t Bsp_Imu_IsHeadingReady(void)
 float Bsp_Imu_GetHeadingDeg(void)
 {
     return g_imu_heading_deg;
+}
+
+uint8_t Bsp_Imu_IsHeadingFresh(uint32_t max_age_ms)
+{
+    if (g_imu_heading_ready == 0U) {
+        return 0U;
+    }
+    return ((uint32_t) (Bsp_Time_GetMilliseconds() - g_imu_last_sflp_ms) <=
+            max_age_ms) ? 1U : 0U;
 }
