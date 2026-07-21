@@ -7,6 +7,12 @@
 
 #include <stdint.h>
 
+extern volatile uint32_t g_imu_uart_irq_count;
+extern volatile uint32_t g_imu_uart_overflow_count;
+extern volatile uint32_t g_imu_uart_error_count;
+extern volatile uint32_t g_imu_uart_tx_count;
+extern volatile uint32_t g_imu_legacy_start_count;
+
 void Bsp_Imu_Init(void);
 void Bsp_Imu_Task(void);
 uint8_t Bsp_Imu_IsHardwareReady(void);

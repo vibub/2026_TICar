@@ -31,17 +31,20 @@
 
 保存并重新构建后，`UART_IMU_INST` 宏出现，`bsp_imu.c` 会自动启用 UART3 ISR；无需再改业务代码。
 
-不要默认发送老工程里的 `AT+MODE=0` / `AT+RST`。官方当前固件上电默认输出 HI91，老模块若没有数据时才在 Watch/Expression 中调用 `Bsp_Imu_SendLegacyStartCommands()`。
+`Bsp_Imu_Init()` 会在 UART 初始化后等待 100 ms，并自动发送老工程已验证的
+`AT+MODE=0` / `AT+RST` 启动序列。`g_imu_legacy_start_count == 1` 且
+`g_imu_uart_tx_count == 19` 表示两条命令已写入 UART3。
 
 ## CCS Watch 验收
 
 观察全局变量 `g_imu`：
 
 1. `hardware_ready == 1`：SysConfig 名称和构建已生效。
-2. `byte_count` 持续增加：UART 接收链路通。
-3. `sync_count` 持续增加：波特率、8N1 和 TX/RX 方向正确。
-4. `valid_frame_count`、`data_frame_count` 持续增加且 `crc_error_count` 基本为 0：协议通。
-5. 转动车体，`euler_deg[2]`（yaw）变化；抬头/侧倾时 `euler_deg[1]` / `[0]` 变化。
-6. `protocol == 1` 表示老 HI219 TLV，`protocol == 2` 表示当前 HI91。
+2. `g_imu_legacy_start_count == 1`、`g_imu_uart_tx_count == 19`：启动命令已发送。
+3. `byte_count` 持续增加：UART 接收链路通。
+4. `sync_count` 持续增加：波特率、8N1 和 TX/RX 方向正确。
+5. `valid_frame_count`、`data_frame_count` 持续增加且 `crc_error_count` 基本为 0：协议通。
+6. 转动车体，`euler_deg[2]`（yaw）变化；抬头/侧倾时 `euler_deg[1]` / `[0]` 变化。
+7. `protocol == 1` 表示老 HI219 TLV，`protocol == 2` 表示当前 HI91。
 
 若 `byte_count` 为 0，先查 3.3 V、共地和转接板插接方向；若有字节但 `sync_count` 为 0，优先查串口参数；若同步正常但 CRC 持续错误，查信号完整性和是否误设了偶校验。

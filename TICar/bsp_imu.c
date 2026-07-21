@@ -23,6 +23,8 @@ static volatile uint16_t g_imu_rx_tail;
 volatile uint32_t g_imu_uart_irq_count;
 volatile uint32_t g_imu_uart_overflow_count;
 volatile uint32_t g_imu_uart_error_count;
+volatile uint32_t g_imu_uart_tx_count;
+volatile uint32_t g_imu_legacy_start_count;
 
 static void Bsp_Imu_PushRx(uint8_t byte)
 {
@@ -41,6 +43,7 @@ static void Bsp_Imu_SendByte(uint8_t byte)
     while (DL_UART_Main_isTXFIFOFull(UART_IMU_INST)) {
     }
     DL_UART_Main_transmitData(UART_IMU_INST, byte);
+    g_imu_uart_tx_count++;
 }
 
 static void Bsp_Imu_SendString(const char *text)
@@ -61,9 +64,16 @@ void Bsp_Imu_Init(void)
     g_imu_uart_irq_count = 0U;
     g_imu_uart_overflow_count = 0U;
     g_imu_uart_error_count = 0U;
+    g_imu_uart_tx_count = 0U;
+    g_imu_legacy_start_count = 0U;
     g_imu.hardware_ready = 1U;
     NVIC_ClearPendingIRQ(UART_IMU_INST_INT_IRQN);
     NVIC_EnableIRQ(UART_IMU_INST_INT_IRQN);
+
+    /* 老 HI219M 固件需要显式切换到二进制输出模式。等待模块上电稳定后，
+     * 复用已验证的 STM32 工程启动序列；当前 HI91 固件也能接受该模式设置。 */
+    delay_cycles(UART_IMU_INST_FREQUENCY / 10U);
+    Bsp_Imu_SendLegacyStartCommands();
 #endif
 }
 
@@ -86,8 +96,9 @@ uint8_t Bsp_Imu_IsHardwareReady(void)
 void Bsp_Imu_SendLegacyStartCommands(void)
 {
 #if defined(UART_IMU_INST)
+    g_imu_legacy_start_count++;
     Bsp_Imu_SendString("AT+MODE=0\r\n");
-    delay_cycles(160000U);
+    delay_cycles(UART_IMU_INST_FREQUENCY / 200U);
     Bsp_Imu_SendString("AT+RST\r\n");
 #endif
 }
