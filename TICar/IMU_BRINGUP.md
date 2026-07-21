@@ -44,8 +44,16 @@ Add these global variables:
   probes `0x6B` automatically.
 - `g_imu_i2c_error_count`: should remain zero after initialization.
 - `g_imu_sample_count`: must continuously increase.
+- `g_imu_sflp_count`: must continuously increase when sensor fusion is running.
+- `g_imu_calibration_status`: keep the vehicle still until this changes from 1 to 2.
+- `g_imu_calibration_sample_count`: increases to 180 during gyro calibration.
+- `g_imu_gyro_bias_dps[0..2]`: measured gyro bias removed from later samples.
+- `g_imu_fifo_overrun_count`: normally remains zero while running; stopping at
+  a breakpoint can make it increase.
 - `g_imu.acc_g[0]`, `[1]`, `[2]`: acceleration in g.
 - `g_imu.gyro_dps[0]`, `[1]`, `[2]`: angular rate in degrees per second.
+- `g_imu.quat[0..3]`: SFLP quaternion in x, y, z, w order.
+- `g_imu.euler_deg[0..2]`: roll, pitch and relative yaw in degrees.
 
 Initialization status values:
 
@@ -56,6 +64,11 @@ Initialization status values:
 | 2 | Device was found but register configuration failed |
 | 3 | Sensor is running |
 
-The initial test uses 60 Hz output data rate, +/-4 g accelerometer range and
-/-2000 dps gyroscope range. INT1/INT2 and the sensor-fusion FIFO can be enabled
-after the basic link is verified.
+The sensor uses 60 Hz output data rate, +/-4 g accelerometer range and +/-2000
+dps gyroscope range. SFLP game rotation, accelerometer and gyroscope samples are
+read from the FIFO without an external interrupt, so INT1/INT2 remain unconnected.
+
+Keep the vehicle completely still for about three seconds after every reset.
+Calibration restarts whenever any raw gyro axis exceeds 5 dps. SFLP is a six-axis
+game rotation vector: roll and pitch are gravity referenced, but yaw is relative
+and will drift slowly because this module has no magnetometer.
