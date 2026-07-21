@@ -23,7 +23,7 @@
 #define APP_MODE_CCD_WATCH 6
 /* 模式号 7：普通赛道 CCD 巡线，使用左右轮速度闭环。 */
 #define APP_MODE_LINE_FOLLOW 7
-/* 模式号 8：检测到有效黑线时等速直行，丢线立即停车。 */
+/* 模式号 8：有效黑线作为运行门控，使用 IMU 相对航向闭环直行；丢线或姿态超时立即停车。 */
 #define APP_MODE_CCD_STRAIGHT 8
 /* 模式号 9：仅采样编码器，不驱动电机。 */
 #define APP_MODE_ENCODER_WATCH 9
