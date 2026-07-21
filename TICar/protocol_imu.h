@@ -10,7 +10,8 @@
 typedef enum {
     IMU_PROTOCOL_UNKNOWN = 0,
     IMU_PROTOCOL_LEGACY_TLV = 1,
-    IMU_PROTOCOL_HI91 = 2
+    IMU_PROTOCOL_HI91 = 2,
+    IMU_PROTOCOL_LSM6DSV16X = 3
 } ImuProtocol;
 
 /**
@@ -32,6 +33,7 @@ typedef struct {
     uint32_t sync_count;
     uint32_t valid_frame_count;
     uint32_t data_frame_count;
+    uint32_t sample_count;
     uint32_t crc_error_count;
     uint32_t length_error_count;
     uint32_t unknown_item_count;

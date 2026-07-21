@@ -1,50 +1,61 @@
-# HI219M / MSPM0G3507 联调
+# LSM6DSV16X I2C bring-up
 
-## 硬件链路
+## Wiring (right-side 7-pin header shown in the module photo)
 
-原理图确认的信号路径：
+Connect the module directly to the MSPM0 for the first test. Do not route it
+through the base board until the direct connection works.
 
-| HI219M | H745 底板网名 | M0 转接板 | MSPM0G3507 |
-| --- | --- | --- | --- |
-| TXD | IIC2_SDA / PB11 | M0_SDA | PB3 / UART3_RX |
-| RXD | IIC2_SCL / PB10 | M0_SCL | PB2 / UART3_TX |
-| VCC | VCC_3V3 | VCC_3V3 | 3.3 V |
-| GND | GND | GND | GND |
+| LSM6DSV16X module | MSPM0 | Purpose |
+| --- | --- | --- |
+| VCC | 3.3V | Module power |
+| GND | GND | Common ground |
+| AD0/MISO | GND | Select I2C address 0x6A |
+| SDA/MOSI | PB3 | I2C1 SDA |
+| SCL/SCLK | PB2 | I2C1 SCL |
+| CS | 3.3V | Select I2C interface |
+| INT1 | Not connected | Polling test does not use interrupts |
 
-底板沿用了 `IIC2_*` 网名，但 HI219M 器件符号上的引脚是 `RXD/TXD`，此处必须按 UART 使用，不能配置成 I2C。
+Remove the PB2/PB3 UART loopback jumper before powering the board. Power the
+sensor from 3.3 V; do not use 5 V for this bring-up.
 
-## SysConfig 配置（唯一待完成项）
+## SysConfig
 
-当前自动化会话没有 CCS SysConfig 接口，因此未直接修改 `TIcar.syscfg`。在 CCS 中打开 `TIcar.syscfg`，添加一个 UART 实例：
+1. Remove the `UART_IMU` UART instance so PB2/PB3 become available.
+2. Add one **I2C** instance.
+3. Set **Name** to `I2C_LSM6DSV16X` (the spelling must match exactly).
+4. Enable **Controller Mode**.
+5. Select **I2C1**.
+6. Set bus speed to **400 kHz / Fast Mode**.
+7. Assign **SCL = PB2** and **SDA = PB3**.
+8. Do not enable I2C interrupts and do not add a GPIO interrupt yet.
+9. Save SysConfig, then run **Project > Clean Project** and rebuild.
 
-- Name: `UART_IMU`
-- Peripheral: `UART3`
-- TX: `PB2`
-- RX: `PB3`
-- Baud: `115200`
-- Data bits: `8`
-- Parity: `None`
-- Stop bits: `1`
-- FIFO: Enable
-- RX FIFO threshold: One entry
-- Interrupts: `RX`、`OVERRUN_ERROR`、`BREAK_ERROR`、`PARITY_ERROR`、`FRAMING_ERROR`、`NOISE_ERROR`
+The module normally provides I2C pull-ups. If both SCL and SDA are not near
+3.3 V while idle, add 4.7 kohm pull-ups to 3.3 V or inspect the module solder
+jumpers.
 
-保存并重新构建后，`UART_IMU_INST` 宏出现，`bsp_imu.c` 会自动启用 UART3 ISR；无需再改业务代码。
+## CCS Watch
 
-`Bsp_Imu_Init()` 会在 UART 初始化后等待 100 ms，并自动发送老工程已验证的
-`AT+MODE=0` / `AT+RST` 启动序列。`g_imu_legacy_start_count == 1` 且
-`g_imu_uart_tx_count == 19` 表示两条命令已写入 UART3。
+Add these global variables:
 
-## CCS Watch 验收
+- `g_imu_init_status`: 3 means initialization completed.
+- `g_imu_who_am_i`: must be `0x70`.
+- `g_imu_i2c_address`: normally `0x6A` with AD0 tied to GND; the code also
+  probes `0x6B` automatically.
+- `g_imu_i2c_error_count`: should remain zero after initialization.
+- `g_imu_sample_count`: must continuously increase.
+- `g_imu.acc_g[0]`, `[1]`, `[2]`: acceleration in g.
+- `g_imu.gyro_dps[0]`, `[1]`, `[2]`: angular rate in degrees per second.
 
-观察全局变量 `g_imu`：
+Initialization status values:
 
-1. `hardware_ready == 1`：SysConfig 名称和构建已生效。
-2. `g_imu_legacy_start_count == 1`、`g_imu_uart_tx_count == 19`：启动命令已发送。
-3. `byte_count` 持续增加：UART 接收链路通。
-4. `sync_count` 持续增加：波特率、8N1 和 TX/RX 方向正确。
-5. `valid_frame_count`、`data_frame_count` 持续增加且 `crc_error_count` 基本为 0：协议通。
-6. 转动车体，`euler_deg[2]`（yaw）变化；抬头/侧倾时 `euler_deg[1]` / `[0]` 变化。
-7. `protocol == 1` 表示老 HI219 TLV，`protocol == 2` 表示当前 HI91。
+| Value | Meaning |
+| --- | --- |
+| 0 | SysConfig did not generate `I2C_LSM6DSV16X` |
+| 1 | Neither address returned WHO_AM_I 0x70; inspect power and wiring |
+| 2 | Device was found but register configuration failed |
+| 3 | Sensor is running |
 
-若 `byte_count` 为 0，先查 3.3 V、共地和转接板插接方向；若有字节但 `sync_count` 为 0，优先查串口参数；若同步正常但 CRC 持续错误，查信号完整性和是否误设了偶校验。
+The initial test uses 60 Hz output data rate, +/-4 g accelerometer range and
+/-2000 dps gyroscope range. INT1/INT2 and the sensor-fusion FIFO can be enabled
+after the basic link is verified.
