@@ -30,24 +30,54 @@
 #define APP_CCD_LOG_FRAME_COUNT 32U // CCD 完整像素调试环形日志保存的帧数。
 
 /*
- * 通用巡线参数。
- * 误差单位为 CCD 像素索引；base speed 是巡线层比例参考，随后映射为 cm/s 轮速目标。
- * 误差越大，基础速度越低、最小转向量越大；修正变化率限制用于抑制 CCD 抖动造成的底盘突变。
+ * 通用巡线参数。巡线层比例参考随后统一映射为 cm/s 轮速目标；CCD 与 K230
+ * 使用独立误差尺度和方向符号，避免新车头坐标与旧传感器参数相互污染。
  */
-#define APP_LINE_BASE_SPEED 0.49f // 巡线层基础比例参考，同时作为比例参考到 cm/s 的换算基准。
-#define APP_LINE_BASE_TARGET_CM_S 30.0f // 黑线居中时左右轮的基础目标速度，单位 cm/s。
-#define APP_LINE_KP 0.0005f // CCD 当前中心误差的比例修正系数。
-#define APP_LINE_KD 0.0010f // CCD 相邻帧误差变化的微分修正系数。
-#define APP_LINE_STEER_LIMIT 0.130f // 单次巡线转向修正量的最大绝对值。
-#define APP_LINE_MEDIUM_MIN_STEER 0.020f // 中等偏差时保证执行的最小转向修正量。
-#define APP_LINE_LARGE_MIN_STEER 0.090f // 大偏差时保证执行的最小转向修正量。
-#define APP_LINE_CORRECTION_SLEW_LIMIT 0.035f // 相邻 20 ms 周期允许的最大转向修正变化量。
-#define APP_LINE_MEDIUM_SPEED_SCALE 0.65f // 中等偏差时基础前进速度的缩放比例。
-#define APP_LINE_LARGE_SPEED_SCALE 0.39f // 大偏差时基础前进速度的缩放比例。
-#define APP_LINE_DEADBAND_ERROR 3 // 黑线中心误差绝对值不超过该像素数时不执行转向修正。
-#define APP_LINE_MEDIUM_ERROR 6 // 判定为中等偏差并开始降速的像素误差阈值。
-#define APP_LINE_LARGE_ERROR 12 // 判定为大偏差并执行强转向的像素误差阈值。
-#define APP_LINE_STEER_SIGN 1.0f // CCD 误差到左右轮差速方向的符号，方向相反时改为 -1.0f。
+#define APP_LINE_BASE_SPEED 0.49f
+#define APP_LINE_BASE_TARGET_CM_S 30.0f
+#define APP_LINE_CORRECTION_SLEW_LIMIT 0.035f
+#define APP_LINE_MEDIUM_SPEED_SCALE 0.65f
+#define APP_LINE_LARGE_SPEED_SCALE 0.39f
+
+/* 旧 CCD 模式在车体旋转 180°后左右语义反转，仍需通过架空轮和实车重新确认。 */
+#define APP_CCD_LINE_KP 0.0005f
+#define APP_CCD_LINE_KD 0.0010f
+#define APP_CCD_LINE_STEER_SIGN (-1.0f)
+#define APP_CCD_LINE_STEER_LIMIT 0.130f
+#define APP_CCD_LINE_MEDIUM_MIN_STEER 0.020f
+#define APP_CCD_LINE_LARGE_MIN_STEER 0.090f
+#define APP_CCD_LINE_DEADBAND_ERROR 3
+#define APP_CCD_LINE_MEDIUM_ERROR 6
+#define APP_CCD_LINE_LARGE_ERROR 12
+
+/* K230 使用 320×240 图像；图像右偏和右前方角度均为正，摄像头不镜像。 */
+#define APP_K230_LINE_BASE_SPEED 0.25f
+#define APP_K230_LINE_KP 0.0015f
+#define APP_K230_LINE_KD 0.0010f
+#define APP_K230_LINE_ANGLE_KP 0.0020f
+#define APP_K230_LINE_STEER_SIGN 1.0f
+#define APP_K230_LINE_STEER_LIMIT 0.120f
+#define APP_K230_LINE_MEDIUM_MIN_STEER 0.025f
+#define APP_K230_LINE_LARGE_MIN_STEER 0.070f
+#define APP_K230_LINE_DEADBAND_ERROR 4
+#define APP_K230_LINE_ANGLE_DEADBAND_D10 20
+#define APP_K230_LINE_MEDIUM_ERROR 20
+#define APP_K230_LINE_LARGE_ERROR 45
+#define APP_K230_LINE_MIN_QUALITY K230_LINE_MIN_QUALITY
+#define APP_K230_LINE_LOST_RECOVER_MAX 5U
+#define APP_K230_LINE_LOST_SPEED_SCALE 0.45f
+#define APP_K230_LINE_LOST_TURN 0.045f
+#define APP_K230_LINE_JUNCTION_SPEED_SCALE 0.55f
+#define APP_K230_LINE_JUNCTION_CONFIRM_FRAMES 2U
+#define APP_K230_LINE_JUNCTION_CLEAR_FRAMES 3U
+#define APP_K230_LINE_JUNCTION_HOLD_MS 300U
+#define APP_K230_LINE_RECOVERY_FRAMES 2U
+
+#define APP_LINE_CONTROL_WAIT_FRAME 0U
+#define APP_LINE_CONTROL_TRACKING 1U
+#define APP_LINE_CONTROL_LOST_SEARCH 2U
+#define APP_LINE_CONTROL_JUNCTION_SLOW 3U
+#define APP_LINE_CONTROL_TIMEOUT_STOP 4U
 /* CCD 直行模式只做有效性门控，不使用中心误差进行转向。 */
 #define APP_CCD_STRAIGHT_SPEED 0.16f // 模式 8 检测到有效黑线时的固定直行比例参考。
 #define APP_IMU_HEADING_KP 0.0030f
@@ -151,12 +181,16 @@
  */
 typedef struct {
     float base_speed;             /* 中心附近的基础前进参考。 */
-    float kp;                     /* CCD 中心误差的比例增益。 */
-    float kd;                     /* 相邻帧误差差分的增益。 */
-    float steer_sign;             /* 将 CCD 误差方向映射到底盘左右轮差速方向。 */
+    float kp;                     /* 横向像素误差比例增益。 */
+    float kd;                     /* 新观测横向误差差分增益。 */
+    float angle_kp;               /* 方向角前馈增益，CCD 配置为 0。 */
+    float steer_sign;             /* 感知坐标到新车体差速方向的符号。 */
     float steer_limit;            /* 最大转向修正绝对值。 */
+    int16_t deadband_error;       /* 横向误差死区。 */
+    int16_t angle_deadband_d10;   /* 0.1°方向角死区。 */
     int16_t medium_error;         /* 开始降速的中等误差阈值。 */
     int16_t large_error;          /* 进入强恢复的较大误差阈值。 */
+    uint8_t min_quality;          /* 低于该质量的观测视为丢线。 */
     float medium_speed_scale;     /* 中等误差时的基础速度缩放。 */
     float large_speed_scale;      /* 大误差时的基础速度缩放。 */
     float medium_min_steer;       /* 中等误差必须保留的最小转向量。 */
@@ -165,6 +199,18 @@ typedef struct {
     float lost_speed_scale;       /* 丢线搜索时的基础速度缩放。 */
     float lost_turn;              /* 丢线搜索时沿最后有效方向施加的转向量。 */
 } App_FollowProfile;
+
+typedef struct {
+    uint8_t source;
+    uint8_t fresh;
+    uint8_t new_frame;
+    uint8_t valid;
+    int16_t target;
+    int16_t error;
+    int16_t angle_d10;
+    uint8_t quality;
+    uint8_t direction_mask;
+} App_LineObservation;
 
 /*
  * 一帧可导出的 CCD 调试快照。
@@ -187,31 +233,68 @@ typedef struct {
     uint16_t raw[BSP_CCD_PIXEL_COUNT];
 } App_CcdLogFrame;
 
-/* 普通巡线的实车参数基线。 */
-static const App_FollowProfile g_line_follow_profile = {
-    APP_LINE_BASE_SPEED, APP_LINE_KP, APP_LINE_KD, APP_LINE_STEER_SIGN,
-    APP_LINE_STEER_LIMIT, APP_LINE_MEDIUM_ERROR, APP_LINE_LARGE_ERROR,
-    APP_LINE_MEDIUM_SPEED_SCALE, APP_LINE_LARGE_SPEED_SCALE,
-    APP_LINE_MEDIUM_MIN_STEER, APP_LINE_LARGE_MIN_STEER,
-    APP_LINE_LOST_RECOVER_MAX, APP_LINE_LOST_SPEED_SCALE, APP_LINE_LOST_TURN
+/* 普通比赛巡线使用 K230 红线观测，初始速度和增益保持保守。 */
+static const App_FollowProfile g_k230_line_follow_profile = {
+    APP_K230_LINE_BASE_SPEED,
+    APP_K230_LINE_KP,
+    APP_K230_LINE_KD,
+    APP_K230_LINE_ANGLE_KP,
+    APP_K230_LINE_STEER_SIGN,
+    APP_K230_LINE_STEER_LIMIT,
+    APP_K230_LINE_DEADBAND_ERROR,
+    APP_K230_LINE_ANGLE_DEADBAND_D10,
+    APP_K230_LINE_MEDIUM_ERROR,
+    APP_K230_LINE_LARGE_ERROR,
+    APP_K230_LINE_MIN_QUALITY,
+    APP_LINE_MEDIUM_SPEED_SCALE,
+    APP_LINE_LARGE_SPEED_SCALE,
+    APP_K230_LINE_MEDIUM_MIN_STEER,
+    APP_K230_LINE_LARGE_MIN_STEER,
+    APP_K230_LINE_LOST_RECOVER_MAX,
+    APP_K230_LINE_LOST_SPEED_SCALE,
+    APP_K230_LINE_LOST_TURN
 };
 
-/* 圆形赛道当前复用普通巡线数值，但保留独立 profile 便于后续单独调参。 */
+/* 圆形和方形旧模式继续使用 CCD，并与 K230 新车头参数完全分离。 */
 static const App_FollowProfile g_circle_follow_profile = {
-    APP_LINE_BASE_SPEED, APP_LINE_KP, APP_LINE_KD, APP_LINE_STEER_SIGN,
-    APP_LINE_STEER_LIMIT, APP_LINE_MEDIUM_ERROR, APP_LINE_LARGE_ERROR,
-    APP_LINE_MEDIUM_SPEED_SCALE, APP_LINE_LARGE_SPEED_SCALE,
-    APP_LINE_MEDIUM_MIN_STEER, APP_LINE_LARGE_MIN_STEER,
-    APP_LINE_LOST_RECOVER_MAX, APP_LINE_LOST_SPEED_SCALE, APP_LINE_LOST_TURN
+    APP_LINE_BASE_SPEED,
+    APP_CCD_LINE_KP,
+    APP_CCD_LINE_KD,
+    0.0f,
+    APP_CCD_LINE_STEER_SIGN,
+    APP_CCD_LINE_STEER_LIMIT,
+    APP_CCD_LINE_DEADBAND_ERROR,
+    0,
+    APP_CCD_LINE_MEDIUM_ERROR,
+    APP_CCD_LINE_LARGE_ERROR,
+    0U,
+    APP_LINE_MEDIUM_SPEED_SCALE,
+    APP_LINE_LARGE_SPEED_SCALE,
+    APP_CCD_LINE_MEDIUM_MIN_STEER,
+    APP_CCD_LINE_LARGE_MIN_STEER,
+    APP_LINE_LOST_RECOVER_MAX,
+    APP_LINE_LOST_SPEED_SCALE,
+    APP_LINE_LOST_TURN
 };
 
-/* 方形直线段使用更长的丢线搜索窗口；何时转向只由编码器边长状态决定。 */
 static const App_FollowProfile g_square_follow_profile = {
-    APP_LINE_BASE_SPEED, APP_LINE_KP, APP_LINE_KD, APP_LINE_STEER_SIGN,
-    APP_LINE_STEER_LIMIT, APP_LINE_MEDIUM_ERROR, APP_LINE_LARGE_ERROR,
-    APP_LINE_MEDIUM_SPEED_SCALE, APP_LINE_LARGE_SPEED_SCALE,
-    APP_LINE_MEDIUM_MIN_STEER, APP_LINE_LARGE_MIN_STEER,
-    APP_SQUARE_LOST_RECOVER_MAX, APP_SQUARE_LOST_SPEED_SCALE,
+    APP_LINE_BASE_SPEED,
+    APP_CCD_LINE_KP,
+    APP_CCD_LINE_KD,
+    0.0f,
+    APP_CCD_LINE_STEER_SIGN,
+    APP_CCD_LINE_STEER_LIMIT,
+    APP_CCD_LINE_DEADBAND_ERROR,
+    0,
+    APP_CCD_LINE_MEDIUM_ERROR,
+    APP_CCD_LINE_LARGE_ERROR,
+    0U,
+    APP_LINE_MEDIUM_SPEED_SCALE,
+    APP_LINE_LARGE_SPEED_SCALE,
+    APP_CCD_LINE_MEDIUM_MIN_STEER,
+    APP_CCD_LINE_LARGE_MIN_STEER,
+    APP_SQUARE_LOST_RECOVER_MAX,
+    APP_SQUARE_LOST_SPEED_SCALE,
     APP_SQUARE_LOST_TURN
 };
 
@@ -343,6 +426,24 @@ volatile float g_line_right_cmd;
 volatile int8_t g_line_recover_direction;
 static int16_t g_line_last_error;
 static float g_line_last_correction;
+
+/* K230 红线巡线 Watch 和安全状态。 */
+volatile uint8_t g_line_source = APP_LINE_SOURCE_DEFAULT;
+volatile uint8_t g_line_control_state = APP_LINE_CONTROL_WAIT_FRAME;
+volatile uint32_t g_k230_line_age_ms = UINT32_MAX;
+volatile int16_t g_k230_line_angle_d10;
+volatile uint8_t g_k230_line_quality;
+volatile uint8_t g_k230_line_direction_mask;
+volatile uint8_t g_k230_junction_active;
+volatile uint8_t g_k230_junction_confirm_count;
+volatile uint8_t g_k230_junction_clear_count;
+volatile uint32_t g_k230_junction_last_side_ms;
+volatile uint8_t g_k230_line_recovery_count;
+volatile uint32_t g_k230_line_timeout_stop_count;
+volatile uint32_t g_k230_line_recovery_total;
+static K230_LineFrame g_k230_cached_line_frame;
+static uint8_t g_k230_has_cached_line_frame;
+static uint8_t g_k230_line_timeout_latched;
 
 /* 模式 8 的 IMU 航向保持；传感器坐标约定为左转正、右转负。 */
 volatile uint8_t g_imu_heading_hold_active;
@@ -540,6 +641,24 @@ static void App_ResetLineState(void)
     g_line_recover_direction = 0;
     g_line_last_error = 0;
     g_line_last_correction = 0.0f;
+
+    g_line_control_state = APP_LINE_CONTROL_WAIT_FRAME;
+    g_k230_line_age_ms = UINT32_MAX;
+    g_k230_line_angle_d10 = 0;
+    g_k230_line_quality = 0U;
+    g_k230_line_direction_mask = 0U;
+    g_k230_junction_active = 0U;
+    g_k230_junction_confirm_count = 0U;
+    g_k230_junction_clear_count = 0U;
+    g_k230_junction_last_side_ms = 0U;
+    g_k230_line_recovery_count = 0U;
+    g_k230_has_cached_line_frame = 0U;
+    g_k230_line_timeout_latched = 0U;
+    g_k230_cached_line_frame.valid = 0U;
+    g_k230_cached_line_frame.error_x = 0;
+    g_k230_cached_line_frame.angle_d10 = 0;
+    g_k230_cached_line_frame.quality = 0U;
+    g_k230_cached_line_frame.direction_mask = 0U;
 }
 
 static void App_ResetImuHeadingHold(void)
@@ -853,8 +972,6 @@ static void App_K230Follow_Task(void)
 {
     K230_TargetFrame frame;
 
-    Protocol_K230_Task();
-
     if ((uint32_t) (Bsp_Time_GetMilliseconds() - g_k230_follow_start_ms) <
         APP_K230_FOLLOW_STARTUP_HOLD_MS) {
         (void) Protocol_K230_TakeLatestFrame(&frame);
@@ -904,7 +1021,10 @@ static void App_K230Follow_Task(void)
     App_K230Follow_ProcessFrame(&frame);
 }
 
-static uint8_t App_FollowTask(const App_FollowProfile *profile, float output_scale);
+static uint8_t App_FollowTask(
+    const App_FollowProfile *profile,
+    float output_scale,
+    uint8_t source);
 
 /* 将一帧 CCD 质量和边沿信息镜像到巡线 Watch，不在此函数中驱动电机。 */
 static void App_UpdateLineSensorWatch(void)
@@ -1072,7 +1192,8 @@ static void App_SquareRouteTask(void)
             (g_square_straight_center_cm >= APP_SQUARE_SLOWDOWN_START_CM) ?
             (APP_SQUARE_APPROACH_TARGET_CM_S / APP_LINE_BASE_TARGET_CM_S) : 1.0f;
         if (App_FollowTask(&g_square_follow_profile,
-                           g_square_straight_output_scale) != 0U) {
+                           g_square_straight_output_scale,
+                           APP_LINE_SOURCE_CCD) != 0U) {
             if (App_SquareConfirmSpeedFault() != 0U) {
                 App_SquareEnterFault(APP_SQUARE_FAULT_SPEED);
             }
@@ -1254,17 +1375,129 @@ static void App_SquareRouteTask(void)
     App_SquareEnterFault(APP_SQUARE_FAULT_INTERNAL_STATE);
 }
 
-/*
- * 通用 20 ms CCD 巡线任务：有效线按误差进行 PD 差速，短时丢线沿最近方向搜索。
- * output_scale 同时缩放左右最终参考，供定距方形路线末端低速接近且不改变转向比例。
- *
- * @return 1 表示本周期执行了一次 CCD 和速度控制；0 表示控制周期尚未到期。
- */
-static uint8_t App_FollowTask(const App_FollowProfile *profile, float output_scale)
+static void App_ReadCcdLineObservation(App_LineObservation *observation)
 {
-    int16_t line_error;
+    Bsp_Ccd_ReadFrame();
+    Bsp_Ccd_Process();
+    App_UpdateLineSensorWatch();
+
+    observation->source = APP_LINE_SOURCE_CCD;
+    observation->fresh = 1U;
+    observation->new_frame = 1U;
+    observation->valid = Bsp_Ccd_IsLineValid();
+    observation->target = observation->valid ? Bsp_Ccd_GetTargetIndex() : -1;
+    observation->error = observation->valid ? Bsp_Ccd_GetLineError() : 0;
+    observation->angle_d10 = 0;
+    observation->quality = observation->valid ? 100U : 0U;
+    observation->direction_mask = observation->valid ?
+                                  K230_LINE_DIRECTION_FRONT : 0U;
+}
+
+static void App_UpdateK230JunctionState(const App_LineObservation *observation)
+{
+    uint8_t side_mask;
+    uint32_t now_ms;
+
+    if ((observation->new_frame == 0U) || (observation->valid == 0U)) {
+        return;
+    }
+
+    now_ms = Bsp_Time_GetMilliseconds();
+    side_mask = observation->direction_mask &
+                (K230_LINE_DIRECTION_LEFT | K230_LINE_DIRECTION_RIGHT);
+
+    if (side_mask != 0U) {
+        if (g_k230_junction_confirm_count < APP_K230_LINE_JUNCTION_CONFIRM_FRAMES) {
+            g_k230_junction_confirm_count++;
+        }
+        g_k230_junction_clear_count = 0U;
+        g_k230_junction_last_side_ms = now_ms;
+        if (g_k230_junction_confirm_count >= APP_K230_LINE_JUNCTION_CONFIRM_FRAMES) {
+            g_k230_junction_active = 1U;
+        }
+        return;
+    }
+
+    g_k230_junction_confirm_count = 0U;
+    if (observation->direction_mask == K230_LINE_DIRECTION_FRONT) {
+        if (g_k230_junction_clear_count < APP_K230_LINE_JUNCTION_CLEAR_FRAMES) {
+            g_k230_junction_clear_count++;
+        }
+        if ((g_k230_junction_active != 0U) &&
+            (g_k230_junction_clear_count >= APP_K230_LINE_JUNCTION_CLEAR_FRAMES) &&
+            ((uint32_t) (now_ms - g_k230_junction_last_side_ms) >=
+             APP_K230_LINE_JUNCTION_HOLD_MS)) {
+            g_k230_junction_active = 0U;
+        }
+    } else {
+        g_k230_junction_clear_count = 0U;
+    }
+}
+
+static void App_ReadK230LineObservation(App_LineObservation *observation)
+{
+    K230_LineFrame frame;
+
+    observation->source = APP_LINE_SOURCE_K230;
+    observation->fresh = Protocol_K230_IsLineFresh();
+    observation->new_frame = Protocol_K230_TakeLatestLineFrame(&frame);
+
+    if (observation->new_frame != 0U) {
+        g_k230_cached_line_frame = frame;
+        g_k230_has_cached_line_frame = 1U;
+    }
+
+    g_k230_line_age_ms = Protocol_K230_GetLineAgeMs();
+    if (g_k230_has_cached_line_frame == 0U) {
+        observation->valid = 0U;
+        observation->target = -1;
+        observation->error = 0;
+        observation->angle_d10 = 0;
+        observation->quality = 0U;
+        observation->direction_mask = 0U;
+        return;
+    }
+
+    observation->error = g_k230_cached_line_frame.error_x;
+    observation->angle_d10 = g_k230_cached_line_frame.angle_d10;
+    observation->quality = g_k230_cached_line_frame.quality;
+    observation->direction_mask = g_k230_cached_line_frame.direction_mask;
+    observation->target = (int16_t) (160 + observation->error);
+    observation->valid = ((observation->fresh != 0U) &&
+                          (g_k230_cached_line_frame.valid != 0U)) ? 1U : 0U;
+
+    g_k230_line_angle_d10 = observation->angle_d10;
+    g_k230_line_quality = observation->quality;
+    g_k230_line_direction_mask = observation->direction_mask;
+}
+
+static void App_LineStopForState(uint8_t state)
+{
+    Bsp_Motor_SpeedPidStop();
+    App_UpdateSpeedWatch();
+    g_line_control_state = state;
+    g_line_valid = 0U;
+    g_line_target = -1;
+    g_line_error_delta = 0;
+    g_line_correction = 0.0f;
+    g_line_left_cmd = 0.0f;
+    g_line_right_cmd = 0.0f;
+    g_line_last_correction = 0.0f;
+}
+
+/*
+ * 通用 20 ms 巡线任务：CCD 每周期产生新观测；K230 以独立频率发布观测，
+ * 速度环在 freshness 窗口内复用最近值，但微分项只对新视觉帧计算。
+ */
+static uint8_t App_FollowTask(
+    const App_FollowProfile *profile,
+    float output_scale,
+    uint8_t source)
+{
+    App_LineObservation observation = {0};
     int16_t error_delta;
     int16_t abs_error;
+    int16_t abs_angle_d10;
     float base_speed;
     float steer_limit;
     float min_steer;
@@ -1276,46 +1509,101 @@ static uint8_t App_FollowTask(const App_FollowProfile *profile, float output_sca
         return 0U;
     }
 
-    Bsp_Ccd_ReadFrame();
-    Bsp_Ccd_Process();
-    App_UpdateLineSensorWatch();
+    g_line_source = source;
+    if (source == APP_LINE_SOURCE_K230) {
+        App_ReadK230LineObservation(&observation);
+        if (observation.quality < profile->min_quality) {
+            observation.valid = 0U;
+        }
+        App_UpdateK230JunctionState(&observation);
 
-    if (Bsp_Ccd_IsLineValid() != 0U) {
-        line_error = Bsp_Ccd_GetLineError();
-        error_delta = (int16_t) (line_error - g_line_last_error);
-        abs_error = (line_error < 0) ? (int16_t) (-line_error) : line_error;
+        if (observation.fresh == 0U) {
+            if (g_k230_line_timeout_latched == 0U) {
+                g_k230_line_timeout_latched = 1U;
+                g_k230_line_timeout_stop_count++;
+            }
+            g_k230_line_recovery_count = 0U;
+            g_k230_junction_active = 0U;
+            App_LineStopForState(APP_LINE_CONTROL_TIMEOUT_STOP);
+            Bsp_Gpio_ToggleHeartbeat();
+            return 1U;
+        }
+
+        if (g_k230_line_timeout_latched != 0U) {
+            if (observation.new_frame != 0U) {
+                if (observation.valid != 0U) {
+                    if (g_k230_line_recovery_count < APP_K230_LINE_RECOVERY_FRAMES) {
+                        g_k230_line_recovery_count++;
+                    }
+                } else {
+                    g_k230_line_recovery_count = 0U;
+                }
+            }
+
+            if (g_k230_line_recovery_count < APP_K230_LINE_RECOVERY_FRAMES) {
+                App_LineStopForState(APP_LINE_CONTROL_TIMEOUT_STOP);
+                Bsp_Gpio_ToggleHeartbeat();
+                return 1U;
+            }
+
+            g_k230_line_timeout_latched = 0U;
+            g_k230_line_recovery_count = 0U;
+            g_k230_line_recovery_total++;
+            g_line_lost_count = 0U;
+            g_line_last_error = observation.error;
+            g_line_last_correction = 0.0f;
+            Bsp_Motor_SpeedPidReset();
+        }
+    } else {
+        App_ReadCcdLineObservation(&observation);
+    }
+
+    if (observation.valid != 0U) {
+        error_delta = observation.new_frame ?
+                      (int16_t) (observation.error - g_line_last_error) : 0;
+        abs_error = (observation.error < 0) ?
+                    (int16_t) (-observation.error) : observation.error;
+        abs_angle_d10 = (observation.angle_d10 < 0) ?
+                        (int16_t) (-observation.angle_d10) : observation.angle_d10;
         base_speed = profile->base_speed;
         steer_limit = profile->steer_limit;
         min_steer = 0.0f;
         correction = profile->steer_sign *
-                     ((profile->kp * (float) line_error) +
-                      (profile->kd * (float) error_delta));
+                     ((profile->kp * (float) observation.error) +
+                      (profile->kd * (float) error_delta) +
+                      (profile->angle_kp * ((float) observation.angle_d10 / 10.0f)));
 
-        if (abs_error <= APP_LINE_DEADBAND_ERROR) {
+        if ((abs_error <= profile->deadband_error) &&
+            (abs_angle_d10 <= profile->angle_deadband_d10)) {
             correction = 0.0f;
             error_delta = 0;
         } else if (abs_error >= profile->large_error) {
-            base_speed = profile->base_speed * profile->large_speed_scale;
+            base_speed *= profile->large_speed_scale;
             min_steer = profile->large_min_steer;
         } else if (abs_error >= profile->medium_error) {
-            base_speed = profile->base_speed * profile->medium_speed_scale;
-            steer_limit = profile->steer_limit * 0.75f;
+            base_speed *= profile->medium_speed_scale;
+            steer_limit *= 0.75f;
             min_steer = profile->medium_min_steer;
         } else {
-            steer_limit = profile->steer_limit * 0.45f;
+            steer_limit *= 0.45f;
         }
 
-        if (line_error > 0) {
+        if ((source == APP_LINE_SOURCE_K230) &&
+            (g_k230_junction_active != 0U)) {
+            base_speed *= APP_K230_LINE_JUNCTION_SPEED_SCALE;
+        }
+
+        if (correction > 0.0f) {
             g_line_recover_direction = 1;
-        } else if (line_error < 0) {
+        } else if (correction < 0.0f) {
             g_line_recover_direction = -1;
         }
 
-        if ((min_steer > 0.0f) && (correction < min_steer) &&
+        if ((min_steer > 0.0f) &&
+            (correction != 0.0f) &&
+            (correction < min_steer) &&
             (correction > -min_steer)) {
-            correction = (line_error > 0) ?
-                         (profile->steer_sign * min_steer) :
-                         (-profile->steer_sign * min_steer);
+            correction = (correction > 0.0f) ? min_steer : -min_steer;
         }
 
         correction = App_LimitFloat(correction, steer_limit);
@@ -1325,15 +1613,21 @@ static uint8_t App_FollowTask(const App_FollowProfile *profile, float output_sca
         right_cmd = (base_speed - correction) * output_scale;
         App_LineApplySpeedPid(left_cmd, right_cmd);
 
+        g_line_control_state = ((source == APP_LINE_SOURCE_K230) &&
+                                (g_k230_junction_active != 0U)) ?
+                               APP_LINE_CONTROL_JUNCTION_SLOW :
+                               APP_LINE_CONTROL_TRACKING;
         g_line_valid = 1U;
         g_line_lost_count = 0U;
-        g_line_target = Bsp_Ccd_GetTargetIndex();
-        g_line_error = line_error;
+        g_line_target = observation.target;
+        g_line_error = observation.error;
         g_line_error_delta = error_delta;
         g_line_correction = correction * output_scale;
         g_line_left_cmd = left_cmd;
         g_line_right_cmd = right_cmd;
-        g_line_last_error = line_error;
+        if (observation.new_frame != 0U) {
+            g_line_last_error = observation.error;
+        }
         g_line_last_correction = correction;
     } else {
         correction = 0.0f;
@@ -1350,12 +1644,15 @@ static uint8_t App_FollowTask(const App_FollowProfile *profile, float output_sca
             left_cmd = (base_speed + correction) * output_scale;
             right_cmd = (base_speed - correction) * output_scale;
             App_LineApplySpeedPid(left_cmd, right_cmd);
+            g_line_control_state = APP_LINE_CONTROL_LOST_SEARCH;
         } else {
-            Bsp_Motor_Stop();
+            App_LineStopForState(APP_LINE_CONTROL_WAIT_FRAME);
         }
 
         g_line_valid = 0U;
-        g_line_lost_count++;
+        if (g_line_lost_count < 0xFFFFU) {
+            g_line_lost_count++;
+        }
         g_line_target = -1;
         g_line_error = g_line_last_error;
         g_line_error_delta = 0;
@@ -1592,12 +1889,13 @@ static uint8_t App_ModeEnter(uint8_t mode)
             App_EnsureCcd();
             return 1U;
         case APP_MODE_LINE_FOLLOW:
-            App_EnsureCcd();
-            Bsp_Ccd_ResetState(); // 模式重入时丢弃其他 CCD 模式留下的目标和帧历史。
             App_EnsureSpeedPid();
             Bsp_Motor_SpeedPidReset();
             Bsp_Motor_EncoderReset();
             App_ResetLineState();
+            g_line_source = APP_LINE_SOURCE_K230;
+            /* 首次进入必须等待连续有效红线帧，禁止消费旧缓存后立即启动。 */
+            g_k230_line_timeout_latched = 1U;
             return 1U;
         case APP_MODE_CCD_STRAIGHT:
             App_EnsureCcd();
@@ -1672,8 +1970,7 @@ static void App_ModeTask(uint8_t mode)
             }
             break;
         case APP_MODE_K230_UART:
-            /* 仅验证 K230 文本协议链路，不驱动电机或云台。 */
-            Protocol_K230_Task();
+            /* 协议已在公共主循环轮询；本模式只用于观察链路 Watch 状态。 */
             break;
         case APP_MODE_MOTOR_PWM:
             /* 左右轮快慢交替，验证逻辑轮与物理轮映射。 */
@@ -1706,8 +2003,9 @@ static void App_ModeTask(uint8_t mode)
             }
             break;
         case APP_MODE_LINE_FOLLOW:
-            /* 普通赛道 profile + 双轮速度闭环。 */
-            (void) App_FollowTask(&g_line_follow_profile, 1.0f);
+            /* K230 红线误差、角度和路口掩码驱动普通巡线。 */
+            (void) App_FollowTask(
+                &g_k230_line_follow_profile, 1.0f, APP_LINE_SOURCE_K230);
             break;
         case APP_MODE_CCD_STRAIGHT:
             /* 只用 CCD 有效性控制固定直行/停车，不进行转向反馈。 */
@@ -1729,8 +2027,9 @@ static void App_ModeTask(uint8_t mode)
             App_SpeedTestTask();
             break;
         case APP_MODE_CIRCLE_FOLLOW:
-            /* 圆形赛道使用独立 profile 入口，便于与普通巡线分开调参。 */
-            (void) App_FollowTask(&g_circle_follow_profile, 1.0f);
+            /* 圆形旧模式继续使用 CCD，便于与 K230 比赛巡线分开标定。 */
+            (void) App_FollowTask(
+                &g_circle_follow_profile, 1.0f, APP_LINE_SOURCE_CCD);
             break;
         case APP_MODE_K230_FOLLOW:
             /* 解析 K230 目标并增量更新双轴云台，链路超时后禁用并在新帧到达时恢复 PWM。 */
@@ -1910,8 +2209,9 @@ void App_Init(void)
  */
 void App_Loop(void)
 {
-    /* IMU 始终接收，STOPPED 和各运动模式都能在 CCS Watch 中观察姿态与链路计数。 */
+    /* IMU 与 K230 始终接收，停止态也要排空 FIFO 并维护各自 freshness。 */
     Bsp_Imu_Task();
+    Protocol_K230_Task();
     App_DebugRequestTask();
     Protocol_Tjc_Task();
     App_ModeManagerTask();

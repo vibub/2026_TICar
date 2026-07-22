@@ -1,6 +1,6 @@
 # 本机 AI/IDE 配置
 .codex/
-.claude/
+.claude*/
 .codegraph/
 .theia/
 .mcp.json
@@ -17,6 +17,8 @@ TICar/ticlang/
 TICar/0713code_analysis.md
 TICar/0713code_analysis.pdf
 TICar/0713debug.md
+
+__pycache__/
 
 TODO.md
 *.pptx
