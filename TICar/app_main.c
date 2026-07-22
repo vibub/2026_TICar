@@ -11,6 +11,7 @@
 #include "app_config.h"
 #include "bsp_ccd.h"
 #include "bsp_gpio.h"
+#include "bsp_imu.h"
 #include "bsp_motor.h"
 #include "bsp_ptz.h"
 #include "bsp_time.h"
@@ -18,6 +19,8 @@
 #include "pid.h"
 #include "protocol_k230.h"
 #include "protocol_tjc.h"
+
+#define APP_DEBUG_REQUEST_NONE 0xFFU
 
 /* 电机映射测试：用明显不同的左右轮比例观察底盘偏航方向。 */
 #define APP_MOTOR_TEST_SLOW_SPEED 0.18f // 电机映射测试中的低速轮比例参考。
@@ -47,6 +50,12 @@
 #define APP_LINE_STEER_SIGN 1.0f // CCD 误差到左右轮差速方向的符号，方向相反时改为 -1.0f。
 /* CCD 直行模式只做有效性门控，不使用中心误差进行转向。 */
 #define APP_CCD_STRAIGHT_SPEED 0.16f // 模式 8 检测到有效黑线时的固定直行比例参考。
+#define APP_IMU_HEADING_KP 0.0030f
+#define APP_IMU_HEADING_KD 0.0015f
+#define APP_IMU_HEADING_DEADBAND_DEG 0.5f
+#define APP_IMU_HEADING_CORRECTION_LIMIT 0.08f
+#define APP_IMU_HEADING_CORRECTION_SLEW 0.02f
+#define APP_IMU_HEADING_MAX_AGE_MS 100U
 
 /* 普通/圆形巡线允许短时沿最后一次有效方向低速搜索，超过窗口后主动停车。 */
 #define APP_LINE_LOST_RECOVER_MAX 8U // 普通和圆形巡线丢线后继续搜索的最大 20 ms 周期数。
@@ -216,6 +225,9 @@ volatile uint8_t g_app_requested_mode = APP_MODE_STOPPED;
 volatile uint8_t g_app_switch_state = APP_SWITCH_IDLE;
 volatile uint32_t g_app_mode_switch_count;
 volatile uint32_t g_app_mode_reject_count;
+volatile uint8_t g_app_debug_request_mode = APP_DEBUG_REQUEST_NONE;
+volatile uint8_t g_app_debug_request_result;
+volatile uint32_t g_app_debug_request_count;
 
 /* 切换内部状态：制动起始时间、应答中的原始请求，以及按需初始化标志。 */
 static uint32_t g_app_switch_deadline_ms;
@@ -331,6 +343,17 @@ volatile float g_line_right_cmd;
 volatile int8_t g_line_recover_direction;
 static int16_t g_line_last_error;
 static float g_line_last_correction;
+
+/* 模式 8 的 IMU 航向保持；传感器坐标约定为左转正、右转负。 */
+volatile uint8_t g_imu_heading_hold_active;
+volatile uint32_t g_imu_heading_hold_stale_count;
+volatile float g_imu_heading_target_deg;
+volatile float g_imu_heading_error_deg;
+volatile float g_imu_heading_correction;
+volatile float g_imu_heading_left_cmd;
+volatile float g_imu_heading_right_cmd;
+static float g_imu_heading_last_error_deg;
+static float g_imu_heading_last_correction;
 
 /*
  * 方形混合路线状态：CCD 只拥有直线段电机控制权，编码器只拥有转向段控制权。
@@ -517,6 +540,19 @@ static void App_ResetLineState(void)
     g_line_recover_direction = 0;
     g_line_last_error = 0;
     g_line_last_correction = 0.0f;
+}
+
+static void App_ResetImuHeadingHold(void)
+{
+    g_imu_heading_hold_active = 0U;
+    g_imu_heading_hold_stale_count = 0U;
+    g_imu_heading_target_deg = 0.0f;
+    g_imu_heading_error_deg = 0.0f;
+    g_imu_heading_correction = 0.0f;
+    g_imu_heading_left_cmd = 0.0f;
+    g_imu_heading_right_cmd = 0.0f;
+    g_imu_heading_last_error_deg = 0.0f;
+    g_imu_heading_last_correction = 0.0f;
 }
 
 /* 清除方形路线距离、圈数和故障锁存，模式重入后从停车等待可靠中心线开始。 */
@@ -1336,32 +1372,78 @@ static uint8_t App_FollowTask(const App_FollowProfile *profile, float output_sca
 /* 基础联调模式：CCD 有效时以固定比例等速直行，无有效线立即主动停车。 */
 static void App_CcdStraightTask(void)
 {
+    float heading_error;
+    float correction;
+    float left_cmd;
+    float right_cmd;
+
     if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
         return;
     }
 
     Bsp_Ccd_ReadFrame();
     Bsp_Ccd_Process();
-    if (Bsp_Ccd_IsLineValid() != 0U) {
-        Bsp_Motor_Set(APP_CCD_STRAIGHT_SPEED, APP_CCD_STRAIGHT_SPEED);
+    if ((Bsp_Ccd_IsLineValid() != 0U) &&
+        (Bsp_Imu_IsHeadingFresh(APP_IMU_HEADING_MAX_AGE_MS) != 0U)) {
+        if (g_imu_heading_hold_active == 0U) {
+            g_imu_heading_hold_active = Bsp_Imu_ZeroYaw();
+            g_imu_heading_last_error_deg = 0.0f;
+            g_imu_heading_last_correction = 0.0f;
+        }
+
+        heading_error = g_imu_heading_target_deg - Bsp_Imu_GetHeadingDeg();
+        if ((heading_error > -APP_IMU_HEADING_DEADBAND_DEG) &&
+            (heading_error < APP_IMU_HEADING_DEADBAND_DEG)) {
+            heading_error = 0.0f;
+        }
+        correction = APP_IMU_HEADING_KP * heading_error +
+            APP_IMU_HEADING_KD *
+                (heading_error - g_imu_heading_last_error_deg);
+        correction = App_LimitFloat(correction,
+            APP_IMU_HEADING_CORRECTION_LIMIT);
+        correction = App_LimitFloatDelta(correction,
+            g_imu_heading_last_correction,
+            APP_IMU_HEADING_CORRECTION_SLEW);
+
+        /* 右偏时 heading 为负，左轮减速、右轮加速，使车辆向左纠偏。 */
+        left_cmd = APP_CCD_STRAIGHT_SPEED - correction;
+        right_cmd = APP_CCD_STRAIGHT_SPEED + correction;
+        Bsp_Motor_Set(left_cmd, right_cmd);
         g_line_valid = 1U;
         g_line_target = Bsp_Ccd_GetTargetIndex();
         g_line_error = Bsp_Ccd_GetLineError();
-        g_line_left_cmd = APP_CCD_STRAIGHT_SPEED;
-        g_line_right_cmd = APP_CCD_STRAIGHT_SPEED;
+        g_line_left_cmd = left_cmd;
+        g_line_right_cmd = right_cmd;
+        g_line_correction = correction;
+        g_imu_heading_error_deg = heading_error;
+        g_imu_heading_correction = correction;
+        g_imu_heading_left_cmd = left_cmd;
+        g_imu_heading_right_cmd = right_cmd;
+        g_imu_heading_last_error_deg = heading_error;
+        g_imu_heading_last_correction = correction;
     } else {
         Bsp_Motor_Stop();
+        if (Bsp_Imu_IsHeadingFresh(APP_IMU_HEADING_MAX_AGE_MS) == 0U) {
+            g_imu_heading_hold_active = 0U;
+            g_imu_heading_hold_stale_count++;
+        }
         g_line_valid = 0U;
         g_line_target = -1;
         g_line_error = 0;
         g_line_left_cmd = 0.0f;
         g_line_right_cmd = 0.0f;
+        g_line_correction = 0.0f;
+        g_imu_heading_error_deg = 0.0f;
+        g_imu_heading_correction = 0.0f;
+        g_imu_heading_left_cmd = 0.0f;
+        g_imu_heading_right_cmd = 0.0f;
+        g_imu_heading_last_error_deg = 0.0f;
+        g_imu_heading_last_correction = 0.0f;
     }
     g_line_dx_max = Bsp_Ccd_GetDxMax();
     g_line_dx_min = Bsp_Ccd_GetDxMin();
     g_line_dx_max_index = Bsp_Ccd_GetDxMaxIndex();
     g_line_dx_min_index = Bsp_Ccd_GetDxMinIndex();
-    g_line_correction = 0.0f;
     Bsp_Gpio_ToggleHeartbeat();
 }
 
@@ -1521,6 +1603,10 @@ static uint8_t App_ModeEnter(uint8_t mode)
             App_EnsureCcd();
             Bsp_Ccd_ResetState(); // 直行判断必须从新帧开始，不能沿用最近有效黑线。
             App_ResetLineState();
+            App_ResetImuHeadingHold();
+            if (Bsp_Imu_IsHeadingFresh(APP_IMU_HEADING_MAX_AGE_MS) != 0U) {
+                g_imu_heading_hold_active = Bsp_Imu_ZeroYaw();
+            }
             return 1U;
         case APP_MODE_ENCODER_WATCH:
             App_EnsureEncoder();
@@ -1761,6 +1847,23 @@ uint8_t App_RequestMode(uint8_t mode)
     return 1U;
 }
 
+/*
+ * CCS Watch one-shot command mailbox. The debugger writes a mode number and
+ * this task submits it through the same guarded switch path as the touchscreen.
+ */
+static void App_DebugRequestTask(void)
+{
+    uint8_t requested_mode = g_app_debug_request_mode;
+
+    if (requested_mode == APP_DEBUG_REQUEST_NONE) {
+        return;
+    }
+
+    g_app_debug_request_mode = APP_DEBUG_REQUEST_NONE;
+    g_app_debug_request_count++;
+    g_app_debug_request_result = App_RequestMode(requested_mode);
+}
+
 uint8_t App_GetCurrentMode(void)
 {
     return g_app_current_mode;
@@ -1774,6 +1877,7 @@ void App_Init(void)
 {
     Bsp_Gpio_Init();
     Bsp_Uart_Init();
+    Bsp_Imu_Init();
     Bsp_Time_Init();
     Bsp_Motor_Init();
     Bsp_Motor_Disable();
@@ -1789,6 +1893,9 @@ void App_Init(void)
     g_app_switch_state = APP_SWITCH_IDLE;
     g_app_mode_switch_count = 0U;
     g_app_mode_reject_count = 0U;
+    g_app_debug_request_mode = APP_DEBUG_REQUEST_NONE;
+    g_app_debug_request_result = 0U;
+    g_app_debug_request_count = 0U;
     g_ccd_initialized = 0U;
     g_encoder_initialized = 0U;
     g_speed_pid_initialized = 0U;
@@ -1803,6 +1910,9 @@ void App_Init(void)
  */
 void App_Loop(void)
 {
+    /* IMU 始终接收，STOPPED 和各运动模式都能在 CCS Watch 中观察姿态与链路计数。 */
+    Bsp_Imu_Task();
+    App_DebugRequestTask();
     Protocol_Tjc_Task();
     App_ModeManagerTask();
     if (g_app_switch_state == APP_SWITCH_IDLE) {
