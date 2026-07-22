@@ -13,15 +13,22 @@
 #define BSP_MOTOR_PWM_PERIOD 10000U
 #define BSP_MOTOR_MAX_RATIO  0.80f
 /*
- * 逻辑轮到物理接线的方向和正反向修正系数。
- * 正逻辑指令必须让对应物理轮前进；左右修正值跟随电机本体，而不是连接器位置。
+ * 车头已旋转 180°：新逻辑左轮使用原右轮通道，新逻辑右轮使用原左轮通道；
+ * 正逻辑指令表示朝新车头前进，因此两个硬件通道都需要反转输出方向。
+ * 修正系数按新逻辑方向重新命名：新前进继承对应旧电机的旧后退标定，反之亦然。
  */
-#define BSP_MOTOR_LEFT_DIR    1.0f // Positive logical command must drive the physical-left wheel forward.
-#define BSP_MOTOR_RIGHT_DIR   1.0f // Positive logical command must drive the physical-right wheel forward.
-#define BSP_MOTOR_LEFT_FORWARD_SCALE  1.00f // Keep the physical-left motor trim with that motor after the connector swap.
-#define BSP_MOTOR_RIGHT_FORWARD_SCALE 0.85f // Keep the physical-right motor trim with that motor after the connector swap.
-#define BSP_MOTOR_LEFT_REVERSE_SCALE  1.00f // Physical-left reverse trim.
-#define BSP_MOTOR_RIGHT_REVERSE_SCALE 0.91f // Physical-right reverse trim.
+#define BSP_MOTOR_LEFT_OUTPUT_SIGN  (-1.0f)
+#define BSP_MOTOR_RIGHT_OUTPUT_SIGN (-1.0f)
+#define BSP_MOTOR_LEFT_FORWARD_SCALE  0.91f /* 新左轮=原右轮，前进使用原右轮后退修正。 */
+#define BSP_MOTOR_LEFT_REVERSE_SCALE  0.85f /* 新左轮后退使用原右轮前进修正。 */
+#define BSP_MOTOR_RIGHT_FORWARD_SCALE 1.00f /* 新右轮=原左轮，前进使用原左轮后退修正。 */
+#define BSP_MOTOR_RIGHT_REVERSE_SCALE 1.00f /* 新右轮后退使用原左轮前进修正。 */
+
+/* 新逻辑左右轮到原有 H 桥/PWM 硬件通道的唯一映射入口。 */
+#define BSP_MOTOR_LEFT_DIR_PIN GPIO_DC_AIN2_PIN
+#define BSP_MOTOR_LEFT_COMPARE_INDEX GPIO_PWM_DC_C1_IDX
+#define BSP_MOTOR_RIGHT_DIR_PIN GPIO_DC_AIN0_PIN
+#define BSP_MOTOR_RIGHT_COMPARE_INDEX GPIO_PWM_DC_C0_IDX
 /*
  * 编码器换算参数：轮径 6.5 cm，每圈 14000 个 A 相硬件边沿，定时器每 10 个边沿产生一次软件计数。
  * 应用以 20 ms 采样，TICK_TO_CM_S 将窗口内软件计数直接换算为轮缘线速度。
@@ -53,12 +60,12 @@
 #define BSP_MOTOR_SPEED_PID_OUTPUT_LIMIT 0.50f // Match the 2025 speed-PID output ceiling for the standalone test.
 #define BSP_MOTOR_SPEED_PWM_ACCEL_SLEW_LIMIT 1.0f // The 2025 controller writes each new PID output directly.
 #define BSP_MOTOR_SPEED_PWM_DECEL_SLEW_LIMIT 1.0f // The 2025 controller does not add a separate output slew limiter.
-#define BSP_MOTOR_SPEED_STARTUP_KICK_MIN_TARGET_CM_S 10.0f // Do not kick a bend's nearly stopped inner wheel.
-#define BSP_MOTOR_SPEED_STARTUP_KICK_PWM 0.10f // Match DC_Start(): apply ten-percent PWM before the first PID result.
-#define BSP_MOTOR_SPEED_STARTUP_KICK_WINDOWS 1U // 2025 gives the direct start command once, then hands control to PID.
-#define BSP_MOTOR_SPEED_STALL_MIN_TARGET_CM_S 5.0f // Ignore no-pulse detection while nearly stopped.
-#define BSP_MOTOR_SPEED_STALL_MIN_PWM 0.18f // Start stall timing only after enough PWM should move a lifted wheel.
-#define BSP_MOTOR_SPEED_STALL_WINDOWS 25U // Stop after 500 ms with commanded motion but no encoder batches.
+#define BSP_MOTOR_SPEED_STARTUP_KICK_MIN_TARGET_CM_S 5.0f // 目标速度达到 5 cm/s 时允许使用启动补偿。
+#define BSP_MOTOR_SPEED_STARTUP_KICK_PWM 0.20f // 启动阶段直接施加 20% PWM 以克服静摩擦。
+#define BSP_MOTOR_SPEED_STARTUP_KICK_WINDOWS 5U // 启动补偿最多保持 5 个 20 ms 控制周期。
+#define BSP_MOTOR_SPEED_STALL_MIN_TARGET_CM_S 5.0f // 低于 5 cm/s 时不进行无编码器反馈检测。
+#define BSP_MOTOR_SPEED_STALL_MIN_PWM 0.18f // PWM 至少达到 18% 后才开始累计无反馈周期。
+#define BSP_MOTOR_SPEED_STALL_WINDOWS 50U // 连续 50 个 20 ms 周期无反馈时置位底层实时故障。
 
 /* 单个逻辑轮的速度控制状态，所有速度字段单位为 cm/s，command/P/I 为 PWM 比例贡献。 */
 typedef struct {
@@ -76,13 +83,13 @@ typedef struct {
 } MotorSpeedPid;
 
 /*
- * 编码器 ISR 累计位置和主循环采样基线。
- * volatile 只用于中断共享；逻辑左右映射已经按当前六线电机接口修正。
+ * 编码器 ISR 直接发布新车体坐标下的逻辑左右位置：新前进计数为正。
+ * volatile 只用于中断共享；硬件通道交换和方向反转均封装在两个 ISR 内。
  */
-static volatile int32_t s_encoder_old_left_count = 0; // Raw old-left encoder position from PB13/PB20.
-static volatile int32_t s_encoder_old_right_count = 0; // Raw old-right encoder position from PB15/PB17.
-static int32_t s_encoder_left_last_count = 0; // Previous logical-left count used to form sample speed.
-static int32_t s_encoder_right_last_count = 0; // Previous logical-right count used to form sample speed.
+static volatile int32_t s_encoder_left_count = 0;
+static volatile int32_t s_encoder_right_count = 0;
+static int32_t s_encoder_left_last_count = 0; /* 上次采样的新逻辑左轮累计计数。 */
+static int32_t s_encoder_right_last_count = 0; /* 上次采样的新逻辑右轮累计计数。 */
 static int16_t s_encoder_left_speed = 0; // Latest logical-left signed tick delta per sample.
 static int16_t s_encoder_right_speed = 0; // Latest logical-right signed tick delta per sample.
 static MotorSpeedPid s_left_speed_pid = {0}; // Logical-left wheel speed controller.
@@ -367,14 +374,14 @@ void Bsp_Motor_Coast(void)
 void Bsp_Motor_Set(float left_ratio, float right_ratio)
 {
     DL_TimerG_startCounter(PWM_DC_INST);
-    Motor_SetOne(Motor_ApplyTrim(left_ratio, BSP_MOTOR_LEFT_DIR,
+    Motor_SetOne(Motor_ApplyTrim(left_ratio, BSP_MOTOR_LEFT_OUTPUT_SIGN,
                                  BSP_MOTOR_LEFT_FORWARD_SCALE,
                                  BSP_MOTOR_LEFT_REVERSE_SCALE),
-                 GPIO_DC_AIN0_PIN, GPIO_PWM_DC_C0_IDX); // Logical left now drives the physical-left six-wire connector.
-    Motor_SetOne(Motor_ApplyTrim(right_ratio, BSP_MOTOR_RIGHT_DIR,
+                 BSP_MOTOR_LEFT_DIR_PIN, BSP_MOTOR_LEFT_COMPARE_INDEX);
+    Motor_SetOne(Motor_ApplyTrim(right_ratio, BSP_MOTOR_RIGHT_OUTPUT_SIGN,
                                  BSP_MOTOR_RIGHT_FORWARD_SCALE,
                                  BSP_MOTOR_RIGHT_REVERSE_SCALE),
-                 GPIO_DC_AIN2_PIN, GPIO_PWM_DC_C1_IDX); // Logical right now drives the physical-right six-wire connector.
+                 BSP_MOTOR_RIGHT_DIR_PIN, BSP_MOTOR_RIGHT_COMPARE_INDEX);
 }
 
 void Bsp_Motor_SetLeftRaw(uint8_t dir_high, uint32_t compare)
@@ -385,11 +392,12 @@ void Bsp_Motor_SetLeftRaw(uint8_t dir_high, uint32_t compare)
 
     DL_TimerG_startCounter(PWM_DC_INST);
     if (dir_high) {
-        DL_GPIO_setPins(GPIO_DC_PORT, GPIO_DC_AIN0_PIN); // Logical left raw follows the corrected physical-left channel.
+        DL_GPIO_setPins(GPIO_DC_PORT, BSP_MOTOR_LEFT_DIR_PIN);
     } else {
-        DL_GPIO_clearPins(GPIO_DC_PORT, GPIO_DC_AIN0_PIN); // Logical left raw follows the corrected physical-left channel.
+        DL_GPIO_clearPins(GPIO_DC_PORT, BSP_MOTOR_LEFT_DIR_PIN);
     }
-    DL_Timer_setCaptureCompareValue(PWM_DC_INST, compare, GPIO_PWM_DC_C0_IDX); // Logical left raw follows the corrected physical-left channel.
+    DL_Timer_setCaptureCompareValue(
+        PWM_DC_INST, compare, BSP_MOTOR_LEFT_COMPARE_INDEX);
 }
 
 void Bsp_Motor_SetRightRaw(uint8_t dir_high, uint32_t compare)
@@ -400,19 +408,20 @@ void Bsp_Motor_SetRightRaw(uint8_t dir_high, uint32_t compare)
 
     DL_TimerG_startCounter(PWM_DC_INST);
     if (dir_high) {
-        DL_GPIO_setPins(GPIO_DC_PORT, GPIO_DC_AIN2_PIN); // Logical right raw follows the corrected physical-right channel.
+        DL_GPIO_setPins(GPIO_DC_PORT, BSP_MOTOR_RIGHT_DIR_PIN);
     } else {
-        DL_GPIO_clearPins(GPIO_DC_PORT, GPIO_DC_AIN2_PIN); // Logical right raw follows the corrected physical-right channel.
+        DL_GPIO_clearPins(GPIO_DC_PORT, BSP_MOTOR_RIGHT_DIR_PIN);
     }
-    DL_Timer_setCaptureCompareValue(PWM_DC_INST, compare, GPIO_PWM_DC_C1_IDX); // Logical right raw follows the corrected physical-right channel.
+    DL_Timer_setCaptureCompareValue(
+        PWM_DC_INST, compare, BSP_MOTOR_RIGHT_COMPARE_INDEX);
 }
 
-/* 启动左右编码器硬件计数器及中断；每 10 个 A 相边沿进入一次 ISR。 */
+/* 启动两个物理编码器计数器；ISR 会交换并反转为新逻辑左右坐标。 */
 void Bsp_Motor_EncoderInit(void)
 {
     Bsp_Motor_EncoderReset();
-    NVIC_EnableIRQ(COMPARE_0_INST_INT_IRQN); // PB13 old-left A phase: one IRQ per ten encoder edges.
-    NVIC_EnableIRQ(COMPARE_1_INST_INT_IRQN); // PB15 old-right A phase: one IRQ per ten encoder edges.
+    NVIC_EnableIRQ(COMPARE_0_INST_INT_IRQN); /* 原左轮通道，现映射为新逻辑右轮。 */
+    NVIC_EnableIRQ(COMPARE_1_INST_INT_IRQN); /* 原右轮通道，现映射为新逻辑左轮。 */
     DL_TimerG_startCounter(COMPARE_0_INST);
     DL_TimerG_startCounter(COMPARE_1_INST);
 }
@@ -423,8 +432,8 @@ void Bsp_Motor_EncoderReset(void)
     uint32_t interrupt_state = __get_PRIMASK();
 
     __disable_irq();
-    s_encoder_old_left_count = 0;
-    s_encoder_old_right_count = 0;
+    s_encoder_left_count = 0;
+    s_encoder_right_count = 0;
     s_encoder_left_last_count = 0;
     s_encoder_right_last_count = 0;
     s_encoder_left_speed = 0;
@@ -444,8 +453,8 @@ void Bsp_Motor_GetEncoderSnapshot(Bsp_Motor_EncoderSnapshot *snapshot)
 
     interrupt_state = __get_PRIMASK();
     __disable_irq();
-    snapshot->left_count = s_encoder_old_left_count;
-    snapshot->right_count = s_encoder_old_right_count;
+    snapshot->left_count = s_encoder_left_count;
+    snapshot->right_count = s_encoder_right_count;
     if (interrupt_state == 0U) {
         __enable_irq();
     }
@@ -474,12 +483,12 @@ void Bsp_Motor_EncoderSample(void)
 
 int32_t Bsp_Motor_GetLeftEncoderCount(void)
 {
-    return s_encoder_old_left_count; // Logical left follows the corrected physical-left encoder channel.
+    return s_encoder_left_count; /* 新逻辑左轮累计计数，新前进为正。 */
 }
 
 int32_t Bsp_Motor_GetRightEncoderCount(void)
 {
-    return s_encoder_old_right_count; // Logical right follows the corrected physical-right encoder channel.
+    return s_encoder_right_count; /* 新逻辑右轮累计计数，新前进为正。 */
 }
 
 int16_t Bsp_Motor_GetLeftEncoderSpeed(void)
@@ -585,28 +594,28 @@ uint32_t Bsp_Motor_GetSpeedFaults(void)
 }
 
 /*
- * 左轮编码器 ISR：硬件累计一批 A 相边沿后触发，读取 B 相判断方向并更新软件位置。
+ * 原左轮编码器现属于新逻辑右轮；新前进等于原后退，因此同步翻转计数符号。
  * ISR 不计算速度、不打印日志，窗口速度由 Bsp_Motor_EncoderSample() 在主循环计算。
  */
 void COMPARE_0_INST_IRQHandler(void)
 {
     if (DL_TimerG_getPendingInterrupt(COMPARE_0_INST) == DL_TIMERG_IIDX_LOAD) {
         if (DL_GPIO_readPins(GPIO_ENCODER_PORT, GPIO_ENCODER_PIN_1B_PIN) == 0U) {
-            s_encoder_old_left_count++;
+            s_encoder_right_count--;
         } else {
-            s_encoder_old_left_count--;
+            s_encoder_right_count++;
         }
     }
 }
 
-/* 右轮编码器 ISR，与左轮采用相同的批量 A 相计数和 B 相方向判定。 */
+/* 原右轮编码器现属于新逻辑左轮，并按新车头方向翻转计数符号。 */
 void COMPARE_1_INST_IRQHandler(void)
 {
     if (DL_TimerG_getPendingInterrupt(COMPARE_1_INST) == DL_TIMERG_IIDX_LOAD) {
         if (DL_GPIO_readPins(GPIO_ENCODER_PORT, GPIO_ENCODER_PIN_2B_PIN) == 0U) {
-            s_encoder_old_right_count++;
+            s_encoder_left_count--;
         } else {
-            s_encoder_old_right_count--;
+            s_encoder_left_count++;
         }
     }
 }

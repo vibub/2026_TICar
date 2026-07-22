@@ -10,12 +10,23 @@ from media.sensor import *
 
 
 class VisionPipeline:
-    """为显示、传统视觉和 YOLO 提供独立的摄像头通道。"""
+    """为显示、传统视觉和 YOLO 提供独立分辨率的摄像头通道。"""
 
-    def __init__(self, vision_size=(640, 360), display_size=(800, 480)):
-        self.vision_size = (
-            ALIGN_UP(vision_size[0], 16),
-            vision_size[1]
+    def __init__(
+        self,
+        cv_size=(320, 240),
+        ai_size=(640, 360),
+        display_size=(800, 480),
+    ):
+        # 传统视觉使用低分辨率 RGB565，保证红线检测可以稳定高频运行。
+        self.cv_size = (
+            ALIGN_UP(cv_size[0], 16),
+            cv_size[1]
+        )
+        # YOLO 使用独立的 RGBP888 通道，避免传统视觉降分辨率影响模型输入。
+        self.ai_size = (
+            ALIGN_UP(ai_size[0], 16),
+            ai_size[1]
         )
         self.display_size = (
             ALIGN_UP(display_size[0], 16),
@@ -49,10 +60,10 @@ class VisionPipeline:
             chn=CAM_CHN_ID_0
         )
 
-        # 通道1直接输出RGB565，供矩形和圆检测使用。
+        # 通道1输出低分辨率 RGB565，供红线、路口及其他传统视觉算法使用。
         self.sensor.set_framesize(
-            width=self.vision_size[0],
-            height=self.vision_size[1],
+            width=self.cv_size[0],
+            height=self.cv_size[1],
             chn=CAM_CHN_ID_1
         )
         self.sensor.set_pixformat(
@@ -60,15 +71,23 @@ class VisionPipeline:
             chn=CAM_CHN_ID_1
         )
 
-        # 通道2输出RGBP888，供YOLO推理使用。
+        # 通道2保持较高分辨率 RGBP888，供 YOLO 推理使用。
         self.sensor.set_framesize(
-            width=self.vision_size[0],
-            height=self.vision_size[1],
+            width=self.ai_size[0],
+            height=self.ai_size[1],
             chn=CAM_CHN_ID_2
         )
         self.sensor.set_pixformat(
             Sensor.RGBP888,
             chn=CAM_CHN_ID_2
+        )
+
+        print(
+            "S20.3A: 通道配置 display={} cv={} ai={}".format(
+                self.display_size,
+                self.cv_size,
+                self.ai_size,
+            )
         )
 
         self.osd_img = image.Image(
