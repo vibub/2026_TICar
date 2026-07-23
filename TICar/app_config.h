@@ -21,7 +21,7 @@
 #define APP_MODE_UART_TEST 5
 /* 模式号 6：采集 CCD 并镜像到 CCS Watch 和 RAM 环形日志。 */
 #define APP_MODE_CCD_WATCH 6
-/* 模式号 7：普通赛道 CCD 巡线，使用左右轮速度闭环。 */
+/* 模式号 7：K230 红线巡线，使用误差/方向角和左右轮速度闭环。 */
 #define APP_MODE_LINE_FOLLOW 7
 /* 模式号 8：有效黑线作为运行门控，使用 IMU 相对航向闭环直行；丢线或姿态超时立即停车。 */
 #define APP_MODE_CCD_STRAIGHT 8
@@ -35,6 +35,11 @@
 #define APP_MODE_K230_FOLLOW 12
 /* 模式号 13：CCD 修正直线方向，编码器控制固定边长和 90°差动转向并持续循环。 */
 #define APP_MODE_SQUARE_FOLLOW 13
+
+/* 巡线数据源编号：普通模式使用 K230，圆形和方形旧模式继续显式使用 CCD。 */
+#define APP_LINE_SOURCE_CCD  0U
+#define APP_LINE_SOURCE_K230 1U
+#define APP_LINE_SOURCE_DEFAULT APP_LINE_SOURCE_K230
 
 /*
  * 兼容旧版编译期模式配置，仅供历史代码和调试记录参考。

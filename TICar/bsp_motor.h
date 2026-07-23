@@ -18,13 +18,16 @@ void Bsp_Motor_Init(void);    /* 初始化后保持驱动桥空闲。 */
 void Bsp_Motor_Disable(void); /* 停止 PWM 并让驱动桥进入电气空闲状态。 */
 void Bsp_Motor_Stop(void);    /* 主动制动：两路桥输入进入短路制动组合。 */
 void Bsp_Motor_Coast(void);   /* 滑行：两路桥输入关闭，不主动吸收机械能。 */
-/** 按逻辑左/右轮设置比例指令；正值前进、负值后退，内部执行限幅和接线方向修正。 */
+/**
+ * 按新车体坐标设置逻辑左/右轮比例；正值朝新车头前进、负值后退。
+ * BSP 内部负责新旧左右轮交换、方向反转、限幅和单轮修正。
+ */
 void Bsp_Motor_Set(float left_ratio, float right_ratio);
-/** 原始硬件联调接口：dir_high 为方向引脚电平，compare 会限制到 PWM 周期。 */
+/** 原始硬件联调接口：left/right 按新车体左右定义，dir_high 仍表示方向引脚原始电平。 */
 void Bsp_Motor_SetLeftRaw(uint8_t dir_high, uint32_t compare);
 void Bsp_Motor_SetRightRaw(uint8_t dir_high, uint32_t compare);
 
-/* 编码器接口。累计计数由 ISR 更新，speed 是最近一次采样窗口内的有符号软件 tick 增量。 */
+/* 编码器接口。left/right 按新车体坐标定义，累计计数和速度在朝新车头前进时为正。 */
 void Bsp_Motor_EncoderInit(void);
 void Bsp_Motor_EncoderReset(void);
 void Bsp_Motor_EncoderSample(void);
