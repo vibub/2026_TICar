@@ -17,6 +17,8 @@ class VisionPipeline:
         cv_size=(320, 240),
         ai_size=(640, 360),
         display_size=(800, 480),
+        hmirror=True,
+        vflip=True,
     ):
         # 传统视觉使用低分辨率 RGB565，保证红线检测可以稳定高频运行。
         self.cv_size = (
@@ -32,6 +34,10 @@ class VisionPipeline:
             ALIGN_UP(display_size[0], 16),
             display_size[1]
         )
+        # CanMV-K230-LP4 V3.0 的摄像头安装方向相对旧板旋转了 180°。
+        # 同时启用水平镜像和垂直翻转，可让显示、传统视觉和 AI 三个通道方向一致。
+        self.hmirror = bool(hmirror)
+        self.vflip = bool(vflip)
 
         self.sensor = None
         self.osd_img = None
@@ -47,7 +53,17 @@ class VisionPipeline:
         print("S20.2: 复位Sensor")
         self.sensor = Sensor() if sensor is None else sensor
         self.sensor.reset()
-        print("S20.3: Sensor复位完成")
+
+        # Sensor 翻转配置为全局设置，必须在启动摄像头前完成。
+        # 旋转 180° 等价于同时进行水平镜像和垂直翻转。
+        self.sensor.set_hmirror(self.hmirror)
+        self.sensor.set_vflip(self.vflip)
+        print(
+            "S20.3: Sensor复位完成，hmirror={} vflip={}".format(
+                self.hmirror,
+                self.vflip,
+            )
+        )
 
         # 通道0直接绑定LCD视频层。
         self.sensor.set_framesize(
