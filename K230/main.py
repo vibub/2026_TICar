@@ -30,6 +30,8 @@ DIGIT_LABELS = ["1", "2", "3", "4", "5", "6", "7", "8"]
 DIGIT_CONFIDENCE_THRESHOLD = 0.60
 DIGIT_INFERENCE_INTERVAL_MS = 200
 DIGIT_DEBUG_INTERVAL_RUNS = 10
+DIGIT_OVERLAY_HOLD_MS = 800
+OSD_UPDATE_INTERVAL_MS = 80
 
 NMS_THRESHOLD = 0.45
 DEAD_ZONE_X = 5
@@ -48,6 +50,13 @@ pipeline = None
 yolo = None
 uart_rx_line = bytearray()
 uart_rx_discard = False
+uart_rx_byte_count = 0
+uart_rx_line_count = 0
+uart_valid_command_count = 0
+uart_last_line = "NONE"
+uart_last_status = "WAIT V"
+uart_last_ack_ms = 0
+osd_error_logged = False
 
 
 def select_best_target(result):
@@ -120,12 +129,14 @@ def create_uart(UART, FPIOA):
 def poll_uart_lines():
     """非阻塞读取 CRLF 文本行，超长行丢弃到下一个换行符。"""
     global uart_rx_line, uart_rx_discard
+    global uart_rx_byte_count, uart_rx_line_count, uart_last_line
 
     completed = []
     received = uart.read()
     if not received:
         return completed
 
+    uart_rx_byte_count += len(received)
     for byte in received:
         if uart_rx_discard:
             if byte == 10:
@@ -138,9 +149,12 @@ def poll_uart_lines():
         if byte == 10:
             if len(uart_rx_line) != 0:
                 try:
-                    completed.append(uart_rx_line.decode())
+                    decoded_line = uart_rx_line.decode()
+                    completed.append(decoded_line)
+                    uart_rx_line_count += 1
+                    uart_last_line = decoded_line
                 except Exception:
-                    pass
+                    uart_last_line = "DECODE ERR"
                 uart_rx_line = bytearray()
             continue
 
@@ -160,11 +174,15 @@ def process_visual_commands(
     parse_visual_command,
 ):
     """处理 MSPM0 V 命令；旧 ACK/调试回包只消费，不形成应答回环。"""
+    global uart_valid_command_count, uart_last_status, uart_last_ack_ms
+
     for line in poll_uart_lines():
         command = parse_visual_command(line)
         if command is None:
-            if DEBUG_PRINT and not line.startswith("ACK,"):
-                print("UART RX:", line)
+            if not line.startswith("ACK,"):
+                uart_last_status = "INVALID LINE"
+                if DEBUG_PRINT:
+                    print("UART RX invalid:", line)
             continue
 
         epoch_changed = current_command.epoch != command.epoch
@@ -188,6 +206,9 @@ def process_visual_commands(
                 command.epoch,
             )
         )
+        uart_valid_command_count += 1
+        uart_last_status = "V OK"
+        uart_last_ack_ms = time.ticks_ms()
         if DEBUG_PRINT:
             print(
                 "VISUAL COMMAND",
@@ -209,6 +230,142 @@ def format_line_message(result):
         )
     # 无线帧仍证明视觉循环在线，但禁止下位机使用旧误差继续控制。
     return "L,0,0,0,{},0\r\n".format(result.quality)
+
+
+def _scale_coordinate(value, source_size, display_size):
+    return int(int(value) * int(display_size) // int(source_size))
+
+
+def _draw_osd_text(osd, x, y, text, color):
+    """统一使用高级文字接口，避免不同固件的基础字体缩放差异。"""
+    osd.draw_string_advanced(x, y, 18, str(text), color=color)
+
+
+def draw_delivery_overlay(
+    line_result,
+    command,
+    last_detection,
+    last_detection_ms,
+    now_ms,
+    max_line_send_gap_ms,
+    max_digit_inference_ms,
+):
+    """把红线、数字和 UART 状态统一重画到 800×480 OSD。"""
+    global osd_error_logged
+
+    try:
+        osd = pipeline.osd_img
+        pipeline.clear_osd()
+
+        white = (255, 255, 255)
+        green = (0, 255, 0)
+        red = (255, 0, 0)
+        yellow = (255, 255, 0)
+        cyan = (0, 255, 255)
+
+        # 红线参考中心和当前控制点使用 320×240 到显示坐标的缩放。
+        display_center_x = DISPLAY_SIZE[0] // 2
+        control_y = _scale_coordinate(204, LINE_CV_SIZE[1], DISPLAY_SIZE[1])
+        line_x = _scale_coordinate(
+            (LINE_CV_SIZE[0] // 2) + line_result.error_x,
+            LINE_CV_SIZE[0],
+            DISPLAY_SIZE[0],
+        )
+        line_color = green if line_result.valid else red
+        osd.draw_line(
+            display_center_x, DISPLAY_SIZE[1] // 2,
+            display_center_x, DISPLAY_SIZE[1] - 1,
+            color=cyan, thickness=2,
+        )
+        osd.draw_line(
+            line_x - 12, control_y, line_x + 12, control_y,
+            color=line_color, thickness=3,
+        )
+        osd.draw_line(
+            line_x, control_y - 12, line_x, control_y + 12,
+            color=line_color, thickness=3,
+        )
+
+        _draw_osd_text(
+            osd, 8, 6,
+            "LINE V{} E{} A{} Q{} M{} P{}".format(
+                int(line_result.valid),
+                line_result.error_x,
+                line_result.angle_d10,
+                line_result.quality,
+                line_result.direction_mask,
+                line_result.point_count,
+            ),
+            line_color,
+        )
+        _draw_osd_text(
+            osd, 8, 30,
+            "V MODE{} TARGET{} REGION{} EPOCH{}".format(
+                command.mode,
+                command.target_digit,
+                command.route_region,
+                command.epoch,
+            ),
+            yellow,
+        )
+        _draw_osd_text(
+            osd, 8, 54,
+            "UART B{} L{} OK{} {}".format(
+                uart_rx_byte_count,
+                uart_rx_line_count,
+                uart_valid_command_count,
+                uart_last_status,
+            ),
+            green if uart_valid_command_count else yellow,
+        )
+        _draw_osd_text(
+            osd, 8, 78,
+            "RX " + uart_last_line[:28],
+            white,
+        )
+        _draw_osd_text(
+            osd, 8, 102,
+            "GAP{}ms YOLO{}ms".format(
+                max_line_send_gap_ms,
+                max_digit_inference_ms,
+            ),
+            white,
+        )
+
+        # 数字推理只有约 5 Hz，缓存框在 TTL 内每次 OSD 刷新时重新绘制。
+        if last_detection is not None:
+            detection_age_ms = time.ticks_diff(now_ms, last_detection_ms)
+            if 0 <= detection_age_ms <= DIGIT_OVERLAY_HOLD_MS:
+                draw_x = _scale_coordinate(
+                    last_detection.x, AI_SIZE[0], DISPLAY_SIZE[0])
+                draw_y = _scale_coordinate(
+                    last_detection.y, AI_SIZE[1], DISPLAY_SIZE[1])
+                draw_w = max(1, _scale_coordinate(
+                    last_detection.width, AI_SIZE[0], DISPLAY_SIZE[0]))
+                draw_h = max(1, _scale_coordinate(
+                    last_detection.height, AI_SIZE[1], DISPLAY_SIZE[1]))
+                osd.draw_rectangle(
+                    draw_x, draw_y, draw_w, draw_h,
+                    color=yellow, thickness=3,
+                )
+                label_y = max(126, draw_y - 24)
+                _draw_osd_text(
+                    osd, draw_x, label_y,
+                    "D{} S{} C{}".format(
+                        last_detection.digit,
+                        last_detection.side,
+                        int(last_detection.confidence * 100),
+                    ),
+                    yellow,
+                )
+
+        pipeline.show_osd()
+        osd_error_logged = False
+    except BaseException as error:
+        if DEBUG_PRINT and not osd_error_logged:
+            osd_error_logged = True
+            print("OSD绘制异常:")
+            sys.print_exception(error)
 
 
 def create_digit_yolo(YOLO11):
@@ -315,22 +472,35 @@ def run_delivery_mode(
     first_result_logged = False
     last_line_send_ms = time.ticks_ms()
     last_digit_run_ms = time.ticks_ms()
+    last_osd_ms = time.ticks_ms()
+    last_detection = None
+    last_detection_ms = 0
     max_line_send_gap_ms = 0
     max_digit_inference_ms = 0
     clock = time.clock()
 
     print("K230比赛视觉启动：红线每帧，数字按V命令运行")
+    print("V命令必须从UART1 RX IO{}输入，ACK从TX IO{}输出".format(
+        K230_UART_RX_IO, K230_UART_TX_IO))
+    print("CanMV IDE USB终端输入不会进入该硬件UART；命令必须以真实LF结尾")
 
     while True:
         os.exitpoint()
         clock.tick()
 
+        previous_mode = command.mode
+        previous_epoch = command.epoch
         command = process_visual_commands(
             command,
             pharmacy_consensus,
             route_consensus,
             parse_visual_command,
         )
+        if (command.mode == constants["VISUAL_MODE_OFF"] or
+                command.epoch != previous_epoch or
+                command.mode != previous_mode):
+            last_detection = None
+            last_detection_ms = 0
 
         # 红线始终优先运行和发送，数字推理不能跳过本轮传统视觉更新。
         vision_frame = pipeline.capture_vision_frame()
@@ -391,6 +561,8 @@ def run_delivery_mode(
                 )
 
                 if detection is not None:
+                    last_detection = detection
+                    last_detection_ms = now_ms
                     flags |= constants["DIGIT_FLAG_VALID"]
                     if target_filter in (None, 0) or detection.digit == target_filter:
                         flags |= constants["DIGIT_FLAG_TARGET_MATCH"]
@@ -418,10 +590,7 @@ def run_delivery_mode(
                         flags |= constants["DIGIT_FLAG_LOCKED"]
                     uart.write(format_digit_frame(False, 0, 0, 0, 0, 0, 0, 0, flags))
 
-                if DEBUG_PRINT:
-                    pipeline.clear_osd()
-                    yolo.draw_result(yolo_result, pipeline.osd_img)
-                    pipeline.show_osd()
+                # DELIVERY 模式由统一 OSD 使用缓存框重画，避免低频 YOLO 框闪烁。
             except BaseException as error:
                 uart.write(
                     format_digit_frame(
@@ -448,6 +617,19 @@ def run_delivery_mode(
                     "max_ms=", max_digit_inference_ms,
                     "line_max_gap_ms=", max_line_send_gap_ms,
                 )
+
+        osd_now_ms = time.ticks_ms()
+        if time.ticks_diff(osd_now_ms, last_osd_ms) >= OSD_UPDATE_INTERVAL_MS:
+            draw_delivery_overlay(
+                line_result,
+                command,
+                last_detection,
+                last_detection_ms,
+                osd_now_ms,
+                max_line_send_gap_ms,
+                max_digit_inference_ms,
+            )
+            last_osd_ms = osd_now_ms
 
         frame_count += 1
         if DEBUG_PRINT and frame_count % LINE_DEBUG_INTERVAL_FRAMES == 0:
