@@ -7,20 +7,30 @@ import time
 K230_UART_TX_IO = 3
 K230_UART_RX_IO = 4
 
-# LINE 为比赛红线巡线；TARGET 保留原有 YOLO 靶标和云台联调功能。
-RUN_MODE = "LINE"
+# DELIVERY 为比赛视觉主程序；LINE 和 TARGET 保留独立联调入口。
+RUN_MODE = "DELIVERY"
 LINE_MODE = "LINE"
+DELIVERY_MODE = "DELIVERY"
 TARGET_MODE = "TARGET"
 
 LINE_CV_SIZE = (320, 240)
 TARGET_CV_SIZE = (640, 360)
 AI_SIZE = (640, 360)
 DISPLAY_SIZE = (800, 480)
-MODEL_INPUT_SIZE = [320, 320]
-MODEL_PATH = "/sdcard/models/yolo11n_det_320.kmodel"
-TARGET_LABELS = {0: "Target"}
 
-CONFIDENCE_THRESHOLD = 0.8
+TARGET_MODEL_INPUT_SIZE = [320, 320]
+TARGET_MODEL_PATH = "/sdcard/models/yolo11n_det_320.kmodel"
+TARGET_LABELS = {0: "Target"}
+TARGET_CONFIDENCE_THRESHOLD = 0.8
+
+# 初版沿用 digit_camera.py 已验证的 320×320、1～8 类模型配置。
+DIGIT_MODEL_INPUT_SIZE = [320, 320]
+DIGIT_MODEL_PATH = "/sdcard/models/yolo11n_det_320.kmodel"
+DIGIT_LABELS = ["1", "2", "3", "4", "5", "6", "7", "8"]
+DIGIT_CONFIDENCE_THRESHOLD = 0.60
+DIGIT_INFERENCE_INTERVAL_MS = 200
+DIGIT_DEBUG_INTERVAL_RUNS = 10
+
 NMS_THRESHOLD = 0.45
 DEAD_ZONE_X = 5
 DEAD_ZONE_Y = 5
@@ -28,6 +38,7 @@ TARGET_SEND_INTERVAL_MS = 100
 LINE_SEND_INTERVAL_MS = 40
 LINE_DEBUG_INTERVAL_FRAMES = 25
 GC_INTERVAL_FRAMES = 32
+UART_RX_LINE_SIZE = 64
 DEBUG_PRINT = True
 
 
@@ -35,6 +46,8 @@ fpioa = None
 uart = None
 pipeline = None
 yolo = None
+uart_rx_line = bytearray()
+uart_rx_discard = False
 
 
 def select_best_target(result):
@@ -104,11 +117,119 @@ def create_uart(UART, FPIOA):
     return result
 
 
-def drain_uart_rx():
-    """非阻塞清空 MSPM0 ACK，避免回包在 K230 接收缓冲区内累计。"""
+def poll_uart_lines():
+    """非阻塞读取 CRLF 文本行，超长行丢弃到下一个换行符。"""
+    global uart_rx_line, uart_rx_discard
+
+    completed = []
     received = uart.read()
-    if DEBUG_PRINT and received:
-        print("UART RX:", received)
+    if not received:
+        return completed
+
+    for byte in received:
+        if uart_rx_discard:
+            if byte == 10:
+                uart_rx_discard = False
+                uart_rx_line = bytearray()
+            continue
+
+        if byte == 13:
+            continue
+        if byte == 10:
+            if len(uart_rx_line) != 0:
+                try:
+                    completed.append(uart_rx_line.decode())
+                except Exception:
+                    pass
+                uart_rx_line = bytearray()
+            continue
+
+        if len(uart_rx_line) < UART_RX_LINE_SIZE - 1:
+            uart_rx_line.append(byte)
+        else:
+            uart_rx_line = bytearray()
+            uart_rx_discard = True
+
+    return completed
+
+
+def process_visual_commands(
+    current_command,
+    pharmacy_consensus,
+    route_consensus,
+    parse_visual_command,
+):
+    """处理 MSPM0 V 命令；旧 ACK/调试回包只消费，不形成应答回环。"""
+    for line in poll_uart_lines():
+        command = parse_visual_command(line)
+        if command is None:
+            if DEBUG_PRINT and not line.startswith("ACK,"):
+                print("UART RX:", line)
+            continue
+
+        epoch_changed = current_command.epoch != command.epoch
+        route_changed = (
+            current_command.mode != command.mode or
+            current_command.route_region != command.route_region or
+            current_command.target_digit != command.target_digit
+        )
+        if epoch_changed:
+            pharmacy_consensus.reset(command.epoch)
+            route_consensus.reset((command.epoch << 4) | command.route_region)
+        elif route_changed:
+            route_consensus.reset((command.epoch << 4) | command.route_region)
+
+        current_command = command
+        uart.write(
+            "A,V,{},{},{},{}\r\n".format(
+                command.mode,
+                command.target_digit,
+                command.route_region,
+                command.epoch,
+            )
+        )
+        if DEBUG_PRINT:
+            print(
+                "VISUAL COMMAND",
+                "mode=", command.mode,
+                "target=", command.target_digit,
+                "region=", command.route_region,
+                "epoch=", command.epoch,
+            )
+    return current_command
+
+
+def format_line_message(result):
+    if result.valid:
+        return "L,1,{},{},{},{}\r\n".format(
+            result.error_x,
+            result.angle_d10,
+            result.quality,
+            result.direction_mask,
+        )
+    # 无线帧仍证明视觉循环在线，但禁止下位机使用旧误差继续控制。
+    return "L,0,0,0,{},0\r\n".format(result.quality)
+
+
+def create_digit_yolo(YOLO11):
+    print("S30D: 加载数字YOLO模型", DIGIT_MODEL_PATH)
+    print("S30D: 输入", DIGIT_MODEL_INPUT_SIZE, "标签", DIGIT_LABELS)
+    detector = YOLO11(
+        task_type="detect",
+        mode="video",
+        kmodel_path=DIGIT_MODEL_PATH,
+        labels=DIGIT_LABELS,
+        rgb888p_size=list(AI_SIZE),
+        model_input_size=DIGIT_MODEL_INPUT_SIZE,
+        display_size=list(pipeline.display_size),
+        conf_thresh=DIGIT_CONFIDENCE_THRESHOLD,
+        nms_thresh=NMS_THRESHOLD,
+        max_boxes_num=50,
+        debug_mode=0,
+    )
+    detector.config_preprocess()
+    print("S31D: 数字YOLO模型加载完成")
+    return detector
 
 
 def run_line_mode(RedLineDetector, VisionPipeline):
@@ -129,8 +250,6 @@ def run_line_mode(RedLineDetector, VisionPipeline):
     if DEBUG_PRINT:
         print("K230红线视觉启动")
         print("传统视觉:", LINE_CV_SIZE, "AI:", AI_SIZE)
-        print("UART1: 115200 8N1, TX IO", K230_UART_TX_IO,
-              "RX IO", K230_UART_RX_IO)
 
     while True:
         os.exitpoint()
@@ -142,20 +261,11 @@ def run_line_mode(RedLineDetector, VisionPipeline):
 
         now_ms = time.ticks_ms()
         if time.ticks_diff(now_ms, last_send_ms) >= LINE_SEND_INTERVAL_MS:
-            if result.valid:
-                message = "L,1,{},{},{},{}\r\n".format(
-                    result.error_x,
-                    result.angle_d10,
-                    result.quality,
-                    result.direction_mask,
-                )
-            else:
-                # 无线帧仍证明视觉循环在线，但禁止下位机使用旧误差继续控制。
-                message = "L,0,0,0,{},0\r\n".format(result.quality)
-
-            uart.write(message)
+            uart.write(format_line_message(result))
             last_send_ms = now_ms
-            drain_uart_rx()
+            received_lines = poll_uart_lines()
+            if DEBUG_PRINT and received_lines:
+                print("UART RX:", received_lines)
 
         frame_count += 1
         if DEBUG_PRINT and frame_count % LINE_DEBUG_INTERVAL_FRAMES == 0:
@@ -167,6 +277,188 @@ def run_line_mode(RedLineDetector, VisionPipeline):
                 "quality=", result.quality,
                 "mask=", result.direction_mask,
                 "points=", result.point_count,
+                "fps=", clock.fps(),
+            )
+
+        if frame_count % GC_INTERVAL_FRAMES == 0:
+            gc.collect()
+
+
+def run_delivery_mode(
+    RedLineDetector,
+    VisionPipeline,
+    YOLO11,
+    DigitConsensus,
+    VisualCommand,
+    make_detections,
+    parse_visual_command,
+    format_digit_frame,
+    is_digit_inference_due,
+    constants,
+):
+    """比赛视觉循环：红线优先，按 MSPM0 状态低频运行数字 YOLO。"""
+    global pipeline, yolo
+
+    pipeline = VisionPipeline(
+        cv_size=LINE_CV_SIZE,
+        ai_size=AI_SIZE,
+        display_size=DISPLAY_SIZE,
+    )
+    pipeline.create()
+    red_line_detector = RedLineDetector()
+    pharmacy_consensus = DigitConsensus(history_size=5, required_votes=3)
+    route_consensus = DigitConsensus(history_size=5, required_votes=3)
+    command = VisualCommand(constants["VISUAL_MODE_OFF"], 0, 0, 0)
+
+    frame_count = 0
+    digit_run_count = 0
+    first_result_logged = False
+    last_line_send_ms = time.ticks_ms()
+    last_digit_run_ms = time.ticks_ms()
+    max_line_send_gap_ms = 0
+    max_digit_inference_ms = 0
+    clock = time.clock()
+
+    print("K230比赛视觉启动：红线每帧，数字按V命令运行")
+
+    while True:
+        os.exitpoint()
+        clock.tick()
+
+        command = process_visual_commands(
+            command,
+            pharmacy_consensus,
+            route_consensus,
+            parse_visual_command,
+        )
+
+        # 红线始终优先运行和发送，数字推理不能跳过本轮传统视觉更新。
+        vision_frame = pipeline.capture_vision_frame()
+        line_result = red_line_detector.detect(vision_frame)
+        vision_frame = None
+
+        now_ms = time.ticks_ms()
+        if time.ticks_diff(now_ms, last_line_send_ms) >= LINE_SEND_INTERVAL_MS:
+            line_gap_ms = time.ticks_diff(now_ms, last_line_send_ms)
+            if line_gap_ms > max_line_send_gap_ms:
+                max_line_send_gap_ms = line_gap_ms
+            uart.write(format_line_message(line_result))
+            last_line_send_ms = now_ms
+
+        digit_enabled = command.mode != constants["VISUAL_MODE_OFF"]
+        if digit_enabled and is_digit_inference_due(
+            now_ms,
+            last_digit_run_ms,
+            DIGIT_INFERENCE_INTERVAL_MS,
+        ):
+            if yolo is None:
+                yolo = create_digit_yolo(YOLO11)
+
+            ai_frame = None
+            ai_array = None
+            inference_start_ms = time.ticks_ms()
+            try:
+                ai_frame, ai_array = pipeline.capture_ai_frame()
+                yolo_result = yolo.run(ai_array)
+
+                if DEBUG_PRINT and not first_result_logged:
+                    first_result_logged = True
+                    print(
+                        "DIGIT RESULT STRUCTURE",
+                        "parts=", len(yolo_result),
+                        "boxes=", len(yolo_result[0]),
+                        "classes=", len(yolo_result[1]),
+                        "scores=", len(yolo_result[2]),
+                    )
+
+                target_filter = (
+                    command.target_digit
+                    if command.mode == constants["VISUAL_MODE_TARGET"]
+                    else None
+                )
+                detections = make_detections(
+                    yolo_result,
+                    DIGIT_LABELS,
+                    DIGIT_CONFIDENCE_THRESHOLD,
+                    target_filter,
+                )
+                detection = detections[0] if detections else None
+                flags = 0
+                consensus = (
+                    route_consensus
+                    if command.mode == constants["VISUAL_MODE_TARGET"]
+                    else pharmacy_consensus
+                )
+
+                if detection is not None:
+                    flags |= constants["DIGIT_FLAG_VALID"]
+                    if target_filter in (None, 0) or detection.digit == target_filter:
+                        flags |= constants["DIGIT_FLAG_TARGET_MATCH"]
+                    status = consensus.observe(detection, now_ms)
+                    if status["confirmed"]:
+                        flags |= constants["DIGIT_FLAG_CONSENSUS"]
+                    if pharmacy_consensus.status()["confirmed"]:
+                        flags |= constants["DIGIT_FLAG_LOCKED"]
+
+                    uart.write(
+                        format_digit_frame(
+                            True,
+                            detection.digit,
+                            detection.x,
+                            detection.y,
+                            detection.width,
+                            detection.height,
+                            detection.side,
+                            int(detection.confidence * 100),
+                            flags,
+                        )
+                    )
+                else:
+                    if pharmacy_consensus.status()["confirmed"]:
+                        flags |= constants["DIGIT_FLAG_LOCKED"]
+                    uart.write(format_digit_frame(False, 0, 0, 0, 0, 0, 0, 0, flags))
+
+                if DEBUG_PRINT:
+                    pipeline.clear_osd()
+                    yolo.draw_result(yolo_result, pipeline.osd_img)
+                    pipeline.show_osd()
+            except BaseException as error:
+                uart.write(
+                    format_digit_frame(
+                        False, 0, 0, 0, 0, 0, 0, 0,
+                        constants["DIGIT_FLAG_ERROR"],
+                    )
+                )
+                print("数字识别异常:")
+                sys.print_exception(error)
+            finally:
+                ai_frame = None
+                ai_array = None
+
+            inference_ms = time.ticks_diff(time.ticks_ms(), inference_start_ms)
+            if inference_ms > max_digit_inference_ms:
+                max_digit_inference_ms = inference_ms
+            last_digit_run_ms = time.ticks_ms()
+            digit_run_count += 1
+
+            if DEBUG_PRINT and digit_run_count % DIGIT_DEBUG_INTERVAL_RUNS == 0:
+                print(
+                    "DIGIT PERF",
+                    "last_ms=", inference_ms,
+                    "max_ms=", max_digit_inference_ms,
+                    "line_max_gap_ms=", max_line_send_gap_ms,
+                )
+
+        frame_count += 1
+        if DEBUG_PRINT and frame_count % LINE_DEBUG_INTERVAL_FRAMES == 0:
+            print(
+                "DELIVERY LINE",
+                "valid=", int(line_result.valid),
+                "error=", line_result.error_x,
+                "mask=", line_result.direction_mask,
+                "visual_mode=", command.mode,
+                "target=", command.target_digit,
+                "region=", command.route_region,
                 "fps=", clock.fps(),
             )
 
@@ -190,12 +482,12 @@ def run_target_mode(YOLO11, VisionPipeline, locate_target_center):
     yolo = YOLO11(
         task_type="detect",
         mode="video",
-        kmodel_path=MODEL_PATH,
+        kmodel_path=TARGET_MODEL_PATH,
         labels=TARGET_LABELS,
         rgb888p_size=list(AI_SIZE),
-        model_input_size=MODEL_INPUT_SIZE,
+        model_input_size=TARGET_MODEL_INPUT_SIZE,
         display_size=list(pipeline.display_size),
-        conf_thresh=CONFIDENCE_THRESHOLD,
+        conf_thresh=TARGET_CONFIDENCE_THRESHOLD,
         nms_thresh=NMS_THRESHOLD,
         max_boxes_num=50,
         debug_mode=0,
@@ -248,7 +540,6 @@ def run_target_mode(YOLO11, VisionPipeline, locate_target_center):
                     )
                 )
                 last_send_ms = now_ms
-                drain_uart_rx()
 
                 if DEBUG_PRINT:
                     print(
@@ -266,8 +557,8 @@ def run_target_mode(YOLO11, VisionPipeline, locate_target_center):
             if time.ticks_diff(now_ms, last_send_ms) >= TARGET_SEND_INTERVAL_MS:
                 uart.write("N\r\n")
                 last_send_ms = now_ms
-                drain_uart_rx()
 
+        poll_uart_lines()
         pipeline.show_osd()
         ai_frame = None
         ai_array = None
@@ -285,6 +576,24 @@ try:
 
     if RUN_MODE == LINE_MODE:
         from red_line import RedLineDetector
+    elif RUN_MODE == DELIVERY_MODE:
+        from red_line import RedLineDetector
+        from libs.YOLO import YOLO11
+        from digit_logic import (
+            DIGIT_FLAG_CONSENSUS,
+            DIGIT_FLAG_ERROR,
+            DIGIT_FLAG_LOCKED,
+            DIGIT_FLAG_TARGET_MATCH,
+            DIGIT_FLAG_VALID,
+            VISUAL_MODE_OFF,
+            VISUAL_MODE_TARGET,
+            DigitConsensus,
+            VisualCommand,
+            format_digit_frame,
+            is_digit_inference_due,
+            make_detections,
+            parse_visual_command,
+        )
     elif RUN_MODE == TARGET_MODE:
         from libs.YOLO import YOLO11
         from target_geometry import locate_target_center
@@ -296,6 +605,27 @@ try:
 
     if RUN_MODE == LINE_MODE:
         run_line_mode(RedLineDetector, VisionPipeline)
+    elif RUN_MODE == DELIVERY_MODE:
+        run_delivery_mode(
+            RedLineDetector,
+            VisionPipeline,
+            YOLO11,
+            DigitConsensus,
+            VisualCommand,
+            make_detections,
+            parse_visual_command,
+            format_digit_frame,
+            is_digit_inference_due,
+            {
+                "VISUAL_MODE_OFF": VISUAL_MODE_OFF,
+                "VISUAL_MODE_TARGET": VISUAL_MODE_TARGET,
+                "DIGIT_FLAG_VALID": DIGIT_FLAG_VALID,
+                "DIGIT_FLAG_TARGET_MATCH": DIGIT_FLAG_TARGET_MATCH,
+                "DIGIT_FLAG_CONSENSUS": DIGIT_FLAG_CONSENSUS,
+                "DIGIT_FLAG_LOCKED": DIGIT_FLAG_LOCKED,
+                "DIGIT_FLAG_ERROR": DIGIT_FLAG_ERROR,
+            },
+        )
     else:
         run_target_mode(YOLO11, VisionPipeline, locate_target_center)
 

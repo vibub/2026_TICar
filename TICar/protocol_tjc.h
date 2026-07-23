@@ -23,6 +23,9 @@
 // 0C	K230 云台跟随	printh 5A A5 0C F3
 // 0D	方形赛道巡线	printh 5A A5 0D F2
 // 0E	查询当前模式	printh 5A A5 0E F1
+// 0F	开始药房数字识别	printh 5A A5 0F F0
+// 10	确认出发路线	printh 5A A5 10 EF
+// 11	复位送药任务	printh 5A A5 11 EE
 
 /*
  * 屏幕请求帧固定为四字节：
@@ -38,6 +41,9 @@
 #define TJC_COMMAND_FIRST_MODE 0x01U
 #define TJC_COMMAND_LAST_MODE 0x0DU
 #define TJC_COMMAND_QUERY 0x0EU
+#define TJC_COMMAND_DELIVERY_IDENTIFY 0x0FU
+#define TJC_COMMAND_DELIVERY_DEPART 0x10U
+#define TJC_COMMAND_DELIVERY_RESET 0x11U
 
 /* MCU 五字节响应帧固定以 0xA5 开头。 */
 #define TJC_RESPONSE_HEADER 0xA5U
@@ -49,8 +55,10 @@ typedef enum {
     TJC_RESULT_SWITCH_OK = 0x12U,        /* 新模式入口已成功完成。 */
     TJC_RESULT_STOPPED = 0x13U,          /* 已处于安全停止态。 */
     TJC_RESULT_ALREADY_ACTIVE = 0x14U,   /* 请求模式已经在运行，无需切换。 */
+    TJC_RESULT_TASK_ACCEPTED = 0x15U,     /* 送药任务命令已受理。 */
     TJC_RESULT_INVALID_COMMAND = 0xE0U,  /* 命令字不在支持范围。 */
-    TJC_RESULT_ENTER_FAILED = 0xE1U      /* 目标模式入口失败并回退停止态。 */
+    TJC_RESULT_ENTER_FAILED = 0xE1U,     /* 目标模式入口失败并回退停止态。 */
+    TJC_RESULT_TASK_REJECTED = 0xE2U     /* 送药任务状态不满足命令条件。 */
 } Tjc_Result;
 
 /*

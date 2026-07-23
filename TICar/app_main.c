@@ -16,6 +16,7 @@
 #include "bsp_ptz.h"
 #include "bsp_time.h"
 #include "bsp_uart.h"
+#include "delivery_task.h"
 #include "pid.h"
 #include "protocol_k230.h"
 #include "protocol_tjc.h"
@@ -444,6 +445,20 @@ volatile uint32_t g_k230_line_recovery_total;
 static K230_LineFrame g_k230_cached_line_frame;
 static uint8_t g_k230_has_cached_line_frame;
 static uint8_t g_k230_line_timeout_latched;
+
+/* 送药任务状态与路线决策 Watch；瞬时数字和锁定目标由 delivery_task 分离管理。 */
+static DeliveryTask g_delivery_task;
+static uint8_t g_delivery_start_pending;
+static uint8_t g_delivery_epoch;
+volatile uint8_t g_delivery_state;
+volatile uint8_t g_delivery_target_digit;
+volatile uint8_t g_delivery_target_locked;
+volatile uint8_t g_delivery_route_region;
+volatile uint8_t g_delivery_junction_id;
+volatile uint8_t g_delivery_pending_decision;
+volatile uint8_t g_delivery_visual_mode;
+volatile uint8_t g_delivery_visual_command_pending;
+volatile uint8_t g_delivery_fault;
 
 /* 模式 8 的 IMU 航向保持；传感器坐标约定为左转正、右转负。 */
 volatile uint8_t g_imu_heading_hold_active;
@@ -1471,6 +1486,39 @@ static void App_ReadK230LineObservation(App_LineObservation *observation)
     g_k230_line_direction_mask = observation->direction_mask;
 }
 
+/* 将公共巡线缓存和数字邮箱合并成一次送药任务输入，避免重复消费 L 邮箱。 */
+static void App_DeliveryTaskUpdate(void)
+{
+    DeliveryTask_Input input = {0};
+    K230_DigitFrame digit_frame;
+
+    if (g_delivery_task.state == DELIVERY_STATE_IDLE) {
+        return;
+    }
+
+    input.line_fresh = Protocol_K230_IsLineFresh();
+    input.line_valid = g_line_valid;
+    input.junction_active = g_k230_junction_active;
+    input.direction_mask = g_k230_line_direction_mask;
+    input.digit_fresh = Protocol_K230_IsDigitFresh();
+    input.digit_new = Protocol_K230_TakeLatestDigitFrame(&digit_frame);
+    if (input.digit_new != 0U) {
+        input.digit = digit_frame;
+    }
+
+    DeliveryTask_Update(&g_delivery_task, &input);
+    g_delivery_state = g_delivery_task.state;
+    g_delivery_target_digit = g_delivery_task.target_digit;
+    g_delivery_target_locked = g_delivery_task.target_locked;
+    g_delivery_route_region = g_delivery_task.route_region;
+    g_delivery_junction_id = g_delivery_task.junction_id;
+    g_delivery_pending_decision = (uint8_t) g_delivery_task.pending_decision;
+    g_delivery_visual_mode = g_delivery_task.visual_mode;
+    g_delivery_visual_command_pending = g_delivery_task.visual_command_pending;
+    g_delivery_fault = ((g_delivery_task.state == DELIVERY_STATE_FAULT) ||
+                        (g_delivery_task.planner.fault != 0U)) ? 1U : 0U;
+}
+
 static void App_LineStopForState(uint8_t state)
 {
     Bsp_Motor_SpeedPidStop();
@@ -1830,6 +1878,10 @@ static void App_ModeExit(uint8_t mode)
     if ((mode == APP_MODE_LINE_FOLLOW) || (mode == APP_MODE_SPEED_TEST) ||
         (mode == APP_MODE_CIRCLE_FOLLOW) || (mode == APP_MODE_SQUARE_FOLLOW)) {
         Bsp_Motor_SpeedPidStop();
+        if (mode == APP_MODE_LINE_FOLLOW) {
+            DeliveryTask_Init(&g_delivery_task);
+            g_delivery_start_pending = 0U;
+        }
     } else if ((mode == APP_MODE_MOTOR_PWM) ||
                (mode == APP_MODE_CCD_STRAIGHT)) {
         Bsp_Motor_Stop();
@@ -1894,6 +1946,11 @@ static uint8_t App_ModeEnter(uint8_t mode)
             Bsp_Motor_EncoderReset();
             App_ResetLineState();
             g_line_source = APP_LINE_SOURCE_K230;
+            if (g_delivery_start_pending == 0U) {
+                DeliveryTask_Init(&g_delivery_task);
+            } else {
+                g_delivery_start_pending = 0U;
+            }
             /* 首次进入必须等待连续有效红线帧，禁止消费旧缓存后立即启动。 */
             g_k230_line_timeout_latched = 1U;
             return 1U;
@@ -2003,9 +2060,23 @@ static void App_ModeTask(uint8_t mode)
             }
             break;
         case APP_MODE_LINE_FOLLOW:
-            /* K230 红线误差、角度和路口掩码驱动普通巡线。 */
-            (void) App_FollowTask(
-                &g_k230_line_follow_profile, 1.0f, APP_LINE_SOURCE_K230);
+            /* 送药识别或路线决策未允许运动时，模式 7 只保持安全停车。 */
+            if ((g_delivery_task.state != DELIVERY_STATE_IDLE) &&
+                (DeliveryTask_IsMotionAllowed(&g_delivery_task) == 0U)) {
+                App_DeliveryTaskUpdate();
+                Bsp_Motor_SpeedPidStop();
+                App_UpdateSpeedWatch();
+            } else {
+                /* K230 红线误差、角度和路口掩码驱动普通巡线。 */
+                (void) App_FollowTask(
+                    &g_k230_line_follow_profile, 1.0f, APP_LINE_SOURCE_K230);
+                App_DeliveryTaskUpdate();
+                if ((g_delivery_task.state != DELIVERY_STATE_IDLE) &&
+                    (DeliveryTask_IsMotionAllowed(&g_delivery_task) == 0U)) {
+                    Bsp_Motor_SpeedPidStop();
+                    App_UpdateSpeedWatch();
+                }
+            }
             break;
         case APP_MODE_CCD_STRAIGHT:
             /* 只用 CCD 有效性控制固定直行/停车，不进行转向反馈。 */
@@ -2168,6 +2239,63 @@ uint8_t App_GetCurrentMode(void)
     return g_app_current_mode;
 }
 
+uint8_t App_DeliveryStartIdentification(void)
+{
+    K230_DigitFrame stale_frame;
+    uint8_t request_result;
+
+    g_delivery_epoch++;
+    if (g_delivery_epoch == 0U) {
+        g_delivery_epoch = 1U;
+    }
+    g_delivery_start_pending = 1U;
+
+    if (g_app_current_mode != APP_MODE_LINE_FOLLOW) {
+        request_result = App_RequestMode(APP_MODE_LINE_FOLLOW);
+        if (request_result == 0U) {
+            g_delivery_start_pending = 0U;
+            return 0U;
+        }
+    }
+
+    (void) Protocol_K230_TakeLatestDigitFrame(&stale_frame);
+    return DeliveryTask_StartIdentification(&g_delivery_task, g_delivery_epoch);
+}
+
+uint8_t App_DeliveryStartRoute(void)
+{
+    if (g_app_current_mode != APP_MODE_LINE_FOLLOW) {
+        return 0U;
+    }
+    return DeliveryTask_StartRoute(&g_delivery_task);
+}
+
+uint8_t App_DeliveryReset(void)
+{
+    DeliveryTask_Reset(&g_delivery_task);
+    g_delivery_start_pending = 0U;
+    g_delivery_state = DELIVERY_STATE_IDLE;
+    g_delivery_target_digit = 0U;
+    g_delivery_target_locked = 0U;
+    g_delivery_route_region = K230_ROUTE_REGION_PHARMACY;
+    g_delivery_junction_id = 0U;
+    g_delivery_pending_decision = ROUTE_DECISION_NONE;
+    g_delivery_visual_mode = K230_VISUAL_MODE_OFF;
+    g_delivery_visual_command_pending = g_delivery_task.visual_command_pending;
+    g_delivery_fault = 0U;
+    return App_RequestMode(APP_MODE_STOPPED);
+}
+
+uint8_t App_DeliverySetRouteRegion(uint8_t region)
+{
+    return DeliveryTask_SetRouteRegion(&g_delivery_task, region);
+}
+
+uint8_t App_DeliveryCommitPendingDecision(void)
+{
+    return DeliveryTask_CommitPendingDecision(&g_delivery_task);
+}
+
 /*
  * 初始化基础 BSP、统一时基和两路协议。初始化期间显式关闭电机和云台，
  * 最终把全部运行时状态复位为 STOPPED，并主动发送一帧初始状态。
@@ -2198,6 +2326,18 @@ void App_Init(void)
     g_ccd_initialized = 0U;
     g_encoder_initialized = 0U;
     g_speed_pid_initialized = 0U;
+    g_delivery_start_pending = 0U;
+    g_delivery_epoch = 0U;
+    DeliveryTask_Init(&g_delivery_task);
+    g_delivery_state = DELIVERY_STATE_IDLE;
+    g_delivery_target_digit = 0U;
+    g_delivery_target_locked = 0U;
+    g_delivery_route_region = K230_ROUTE_REGION_PHARMACY;
+    g_delivery_junction_id = 0U;
+    g_delivery_pending_decision = ROUTE_DECISION_NONE;
+    g_delivery_visual_mode = K230_VISUAL_MODE_OFF;
+    g_delivery_visual_command_pending = 0U;
+    g_delivery_fault = 0U;
     App_ResetLineState();
     App_ResetSquareState();
     Protocol_Tjc_SendResult(TJC_RESULT_STATE, APP_MODE_STOPPED, TJC_COMMAND_QUERY);
