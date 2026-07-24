@@ -200,6 +200,20 @@ static int test_independent_timeouts(void)
     return 1;
 }
 
+static int test_invalid_line_is_counted_without_reply(void)
+{
+    K230_LineFrame frame;
+
+    reset_harness();
+    feed_text("ERR,FRAME\nL,1,3,4,90,2\n");
+
+    CHECK(g_k230_invalid_frame_count == 1U);
+    CHECK(s_tx_length == 0U);
+    CHECK(Protocol_K230_TakeLatestLineFrame(&frame) == 1U);
+    CHECK(frame.error_x == 3);
+    return 1;
+}
+
 static int test_overlong_line_resynchronizes(void)
 {
     static const char input[] =
@@ -212,7 +226,7 @@ static int test_overlong_line_resynchronizes(void)
     CHECK(g_k230_invalid_frame_count == 1U);
     CHECK(g_k230_line_frame_count == 1U);
     CHECK(g_k230_line_alive == 1U);
-    CHECK(strcmp(s_tx, "ERR,FRAME\r\n") == 0);
+    CHECK(s_tx_length == 0U);
     return 1;
 }
 
@@ -337,6 +351,7 @@ int main(void)
         !test_line_publish_and_mailbox() ||
         !test_invalid_line_stays_alive_but_not_controllable() ||
         !test_independent_timeouts() ||
+        !test_invalid_line_is_counted_without_reply() ||
         !test_overlong_line_resynchronizes() ||
         !test_line_age() ||
         !test_digit_parser_boundaries() ||

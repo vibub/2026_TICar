@@ -126,6 +126,8 @@ static int test_reset_sends_plain_off_command(void)
     CHECK(s_sent_target == 0U);
     CHECK(s_sent_region == K230_ROUTE_REGION_PHARMACY);
     CHECK(s_sent_epoch == 0U);
+    CHECK(s_send_count == 1U);
+    CHECK(task.visual_command_pending == 1U);
     return 1;
 }
 

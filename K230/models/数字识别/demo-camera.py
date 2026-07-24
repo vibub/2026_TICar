@@ -15,9 +15,9 @@ import image
 import time
 
 # 这里为自动生成内容，自定义场景请修改为您自己的模型路径、标签名称、模型输入大小
-kmodel_path="/sdcard/models/yolo11n_det_640.kmodel"
-labels = {0: '1', 1: '2', 2: '3', 3: '4', 4: '5', 5: '6', 6: '7', 7: '8', 8: '9'}
-model_input_size = [640, 640]
+kmodel_path="/sdcard/yolo11n_det_320.kmodel"
+labels = {0: '1', 1: '2', 2: '3', 3: '4', 4: '5', 5: '6', 6: '7', 7: '8'}
+model_input_size = [320, 320]
 # 显示模式，可以选择"hdmi"、"lcd3_5"(3.5寸mipi屏)和"lcd2_4"(2.4寸mipi屏)
 display = "lcd3_5"
 
@@ -41,10 +41,10 @@ pl = PipeLine(
 )
 
 if display == "lcd2_4":
-    pl.create(sensor=Sensor(width=1280, height=960))  # 创建PipeLine实例，画面4:3
+    pl.create(sensor=Sensor(id=2, width=1280, height=960))  # 创建PipeLine实例，摄像头csi2, 画面4:3
 
 else:
-    pl.create(sensor=Sensor(width=1920, height=1080))  # 创建PipeLine实例
+    pl.create(sensor=Sensor(id=2, width=1920, height=1080))  # 创建PipeLine实例,摄像头csi2
 
 display_size = pl.get_display_size()
 

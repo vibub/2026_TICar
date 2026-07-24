@@ -343,8 +343,8 @@ static void Protocol_K230_ProcessCompleteLine(void)
     }
 
     if (accepted == 0U) {
+        /* K230 周期遥测只做统计和丢弃，不回发错误文本干扰控制命令。 */
         g_k230_invalid_frame_count++;
-        Bsp_Uart_K230_SendString("ERR,FRAME\r\n");
     }
 
     g_k230_line_length = 0U;
@@ -393,7 +393,7 @@ void Protocol_K230_Task(void)
             g_k230_line_length = 0U;
             g_k230_discard_until_lf = 1U;
             g_k230_invalid_frame_count++;
-            Bsp_Uart_K230_SendString("ERR,FRAME\r\n");
+            /* 超长行丢弃到 LF 后重新同步，MSPM0 不向 K230 发送错误回包。 */
         }
     }
 

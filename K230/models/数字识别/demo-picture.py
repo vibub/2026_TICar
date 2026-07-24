@@ -12,9 +12,9 @@ import image
 
 # 这里为自动生成内容，自定义场景请修改为您自己的测试图片、模型路径、标签名称、模型输入大小
 img_path="/sdcard/val.jpg"
-kmodel_path="/sdcard/yolo11n_det_640.kmodel"
-labels = {0: '1', 1: '2', 2: '3', 3: '4', 4: '5', 5: '6', 6: '7', 7: '8', 8: '9'}
-model_input_size = [640, 640]
+kmodel_path="/sdcard/yolo11n_det_320.kmodel"
+labels = {0: '1', 1: '2', 2: '3', 3: '4', 4: '5', 5: '6', 6: '7', 7: '8'}
+model_input_size = [320, 320]
 
 img, img_ori = read_image(img_path)
 rgb888p_size = [img.shape[2], img.shape[1]]

@@ -1879,7 +1879,8 @@ static void App_ModeExit(uint8_t mode)
         (mode == APP_MODE_CIRCLE_FOLLOW) || (mode == APP_MODE_SQUARE_FOLLOW)) {
         Bsp_Motor_SpeedPidStop();
         if (mode == APP_MODE_LINE_FOLLOW) {
-            DeliveryTask_Init(&g_delivery_task);
+            /* 停止或切换模式时同步关闭 K230 数字视觉，避免残留送药状态。 */
+            DeliveryTask_Reset(&g_delivery_task);
             g_delivery_start_pending = 0U;
         }
     } else if ((mode == APP_MODE_MOTOR_PWM) ||
