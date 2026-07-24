@@ -213,6 +213,8 @@ void DeliveryTask_Update(DeliveryTask *task, const DeliveryTask_Input *input)
         (decision == ROUTE_DECISION_FRONT)) {
         task->pending_decision = decision;
         task->state = DELIVERY_STATE_HOLD;
+        /* 路口动作期间只保留红线通道，暂停 YOLO，避免推理阻塞 L 帧和转向控制。 */
+        (void) DeliveryTask_SendVisualCommand(task, K230_VISUAL_MODE_OFF);
     } else if (decision == ROUTE_DECISION_FAULT) {
         task->pending_decision = decision;
         task->state = DELIVERY_STATE_FAULT;
@@ -247,13 +249,22 @@ uint8_t DeliveryTask_CommitPendingDecision(DeliveryTask *task)
     return 1U;
 }
 
+void DeliveryTask_FailPendingDecision(DeliveryTask *task)
+{
+    if (task == NULL) {
+        return;
+    }
+    task->state = DELIVERY_STATE_FAULT;
+    task->pending_decision = ROUTE_DECISION_FAULT;
+}
+
 uint8_t DeliveryTask_IsMotionAllowed(const DeliveryTask *task)
 {
     if (task == NULL) {
         return 0U;
     }
-    return ((task->state == DELIVERY_STATE_FOLLOW) ||
-            (task->state == DELIVERY_STATE_DECIDE)) ? 1U : 0U;
+    /* 路口进入 DECIDE 后先停车等待数字和方向决策，避免越过理想转向位置。 */
+    return (task->state == DELIVERY_STATE_FOLLOW) ? 1U : 0U;
 }
 
 uint8_t DeliveryTask_HasPendingTurn(const DeliveryTask *task)

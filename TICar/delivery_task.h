@@ -55,6 +55,9 @@ uint8_t DeliveryTask_SetRouteRegion(DeliveryTask *task, uint8_t region);
 /** 实际完成当前转向后提交路径；当前实现不替代底盘转向控制。 */
 uint8_t DeliveryTask_CommitPendingDecision(DeliveryTask *task);
 
+/** 路口动作执行失败时锁存送药故障，禁止继续巡线或提交路径。 */
+void DeliveryTask_FailPendingDecision(DeliveryTask *task);
+
 uint8_t DeliveryTask_IsMotionAllowed(const DeliveryTask *task);
 uint8_t DeliveryTask_HasPendingTurn(const DeliveryTask *task);
 

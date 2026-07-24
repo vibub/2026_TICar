@@ -16,6 +16,7 @@
 #include "bsp_ptz.h"
 #include "bsp_time.h"
 #include "bsp_uart.h"
+#include "delivery_maneuver.h"
 #include "delivery_task.h"
 #include "pid.h"
 #include "protocol_k230.h"
@@ -79,6 +80,8 @@
 #define APP_LINE_CONTROL_LOST_SEARCH 2U
 #define APP_LINE_CONTROL_JUNCTION_SLOW 3U
 #define APP_LINE_CONTROL_TIMEOUT_STOP 4U
+#define APP_LINE_CONTROL_MANEUVER_TURN 5U
+#define APP_LINE_CONTROL_MANEUVER_REACQUIRE 6U
 /* CCD 直行模式只做有效性门控，不使用中心误差进行转向。 */
 #define APP_CCD_STRAIGHT_SPEED 0.16f // 模式 8 检测到有效黑线时的固定直行比例参考。
 #define APP_IMU_HEADING_KP 0.0030f
@@ -459,6 +462,15 @@ volatile uint8_t g_delivery_pending_decision;
 volatile uint8_t g_delivery_visual_mode;
 volatile uint8_t g_delivery_visual_command_pending;
 volatile uint8_t g_delivery_fault;
+
+/* 路口动作执行器 Watch：状态、故障和轮速目标用于实车标定 IMU 转角与重捕获过程。 */
+static DeliveryManeuver g_delivery_maneuver;
+volatile uint8_t g_delivery_maneuver_state;
+volatile uint8_t g_delivery_maneuver_turn_phase;
+volatile uint8_t g_delivery_maneuver_fault;
+volatile float g_delivery_maneuver_heading_target_deg;
+volatile float g_delivery_maneuver_left_target_cm_s;
+volatile float g_delivery_maneuver_right_target_cm_s;
 
 /* 模式 8 的 IMU 航向保持；传感器坐标约定为左转正、右转负。 */
 volatile uint8_t g_imu_heading_hold_active;
@@ -1486,27 +1498,17 @@ static void App_ReadK230LineObservation(App_LineObservation *observation)
     g_k230_line_direction_mask = observation->direction_mask;
 }
 
-/* 将公共巡线缓存和数字邮箱合并成一次送药任务输入，避免重复消费 L 邮箱。 */
-static void App_DeliveryTaskUpdate(void)
+static void App_PrepareK230LineObservation(App_LineObservation *observation)
 {
-    DeliveryTask_Input input = {0};
-    K230_DigitFrame digit_frame;
-
-    if (g_delivery_task.state == DELIVERY_STATE_IDLE) {
-        return;
+    App_ReadK230LineObservation(observation);
+    if (observation->quality < g_k230_line_follow_profile.min_quality) {
+        observation->valid = 0U;
     }
+    App_UpdateK230JunctionState(observation);
+}
 
-    input.line_fresh = Protocol_K230_IsLineFresh();
-    input.line_valid = g_line_valid;
-    input.junction_active = g_k230_junction_active;
-    input.direction_mask = g_k230_line_direction_mask;
-    input.digit_fresh = Protocol_K230_IsDigitFresh();
-    input.digit_new = Protocol_K230_TakeLatestDigitFrame(&digit_frame);
-    if (input.digit_new != 0U) {
-        input.digit = digit_frame;
-    }
-
-    DeliveryTask_Update(&g_delivery_task, &input);
+static void App_UpdateDeliveryWatch(void)
+{
     g_delivery_state = g_delivery_task.state;
     g_delivery_target_digit = g_delivery_task.target_digit;
     g_delivery_target_locked = g_delivery_task.target_locked;
@@ -1516,7 +1518,35 @@ static void App_DeliveryTaskUpdate(void)
     g_delivery_visual_mode = g_delivery_task.visual_mode;
     g_delivery_visual_command_pending = g_delivery_task.visual_command_pending;
     g_delivery_fault = ((g_delivery_task.state == DELIVERY_STATE_FAULT) ||
-                        (g_delivery_task.planner.fault != 0U)) ? 1U : 0U;
+                        (g_delivery_task.planner.fault != 0U) ||
+                        (g_delivery_maneuver.state == DELIVERY_MANEUVER_STATE_FAULT)) ? 1U : 0U;
+}
+
+/* 将本周期红线观测和数字邮箱合并为一次送药任务输入，避免重复消费 L 邮箱。 */
+static void App_DeliveryTaskUpdate(const App_LineObservation *line_observation)
+{
+    DeliveryTask_Input input = {0};
+    K230_DigitFrame digit_frame;
+
+    if (g_delivery_task.state == DELIVERY_STATE_IDLE) {
+        App_UpdateDeliveryWatch();
+        return;
+    }
+
+    if (line_observation != NULL) {
+        input.line_fresh = line_observation->fresh;
+        input.line_valid = line_observation->valid;
+        input.junction_active = g_k230_junction_active;
+        input.direction_mask = line_observation->direction_mask;
+    }
+    input.digit_fresh = Protocol_K230_IsDigitFresh();
+    input.digit_new = Protocol_K230_TakeLatestDigitFrame(&digit_frame);
+    if (input.digit_new != 0U) {
+        input.digit = digit_frame;
+    }
+
+    DeliveryTask_Update(&g_delivery_task, &input);
+    App_UpdateDeliveryWatch();
 }
 
 static void App_LineStopForState(uint8_t state)
@@ -1533,16 +1563,12 @@ static void App_LineStopForState(uint8_t state)
     g_line_last_correction = 0.0f;
 }
 
-/*
- * 通用 20 ms 巡线任务：CCD 每周期产生新观测；K230 以独立频率发布观测，
- * 速度环在 freshness 窗口内复用最近值，但微分项只对新视觉帧计算。
- */
-static uint8_t App_FollowTask(
+static void App_ApplyFollowObservation(
     const App_FollowProfile *profile,
     float output_scale,
-    uint8_t source)
+    uint8_t source,
+    const App_LineObservation *observation)
 {
-    App_LineObservation observation = {0};
     int16_t error_delta;
     int16_t abs_error;
     int16_t abs_angle_d10;
@@ -1553,73 +1579,20 @@ static uint8_t App_FollowTask(
     float left_cmd;
     float right_cmd;
 
-    if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
-        return 0U;
-    }
-
-    g_line_source = source;
-    if (source == APP_LINE_SOURCE_K230) {
-        App_ReadK230LineObservation(&observation);
-        if (observation.quality < profile->min_quality) {
-            observation.valid = 0U;
-        }
-        App_UpdateK230JunctionState(&observation);
-
-        if (observation.fresh == 0U) {
-            if (g_k230_line_timeout_latched == 0U) {
-                g_k230_line_timeout_latched = 1U;
-                g_k230_line_timeout_stop_count++;
-            }
-            g_k230_line_recovery_count = 0U;
-            g_k230_junction_active = 0U;
-            App_LineStopForState(APP_LINE_CONTROL_TIMEOUT_STOP);
-            Bsp_Gpio_ToggleHeartbeat();
-            return 1U;
-        }
-
-        if (g_k230_line_timeout_latched != 0U) {
-            if (observation.new_frame != 0U) {
-                if (observation.valid != 0U) {
-                    if (g_k230_line_recovery_count < APP_K230_LINE_RECOVERY_FRAMES) {
-                        g_k230_line_recovery_count++;
-                    }
-                } else {
-                    g_k230_line_recovery_count = 0U;
-                }
-            }
-
-            if (g_k230_line_recovery_count < APP_K230_LINE_RECOVERY_FRAMES) {
-                App_LineStopForState(APP_LINE_CONTROL_TIMEOUT_STOP);
-                Bsp_Gpio_ToggleHeartbeat();
-                return 1U;
-            }
-
-            g_k230_line_timeout_latched = 0U;
-            g_k230_line_recovery_count = 0U;
-            g_k230_line_recovery_total++;
-            g_line_lost_count = 0U;
-            g_line_last_error = observation.error;
-            g_line_last_correction = 0.0f;
-            Bsp_Motor_SpeedPidReset();
-        }
-    } else {
-        App_ReadCcdLineObservation(&observation);
-    }
-
-    if (observation.valid != 0U) {
-        error_delta = observation.new_frame ?
-                      (int16_t) (observation.error - g_line_last_error) : 0;
-        abs_error = (observation.error < 0) ?
-                    (int16_t) (-observation.error) : observation.error;
-        abs_angle_d10 = (observation.angle_d10 < 0) ?
-                        (int16_t) (-observation.angle_d10) : observation.angle_d10;
+    if (observation->valid != 0U) {
+        error_delta = observation->new_frame ?
+                      (int16_t) (observation->error - g_line_last_error) : 0;
+        abs_error = (observation->error < 0) ?
+                    (int16_t) (-observation->error) : observation->error;
+        abs_angle_d10 = (observation->angle_d10 < 0) ?
+                        (int16_t) (-observation->angle_d10) : observation->angle_d10;
         base_speed = profile->base_speed;
         steer_limit = profile->steer_limit;
         min_steer = 0.0f;
         correction = profile->steer_sign *
-                     ((profile->kp * (float) observation.error) +
+                     ((profile->kp * (float) observation->error) +
                       (profile->kd * (float) error_delta) +
-                      (profile->angle_kp * ((float) observation.angle_d10 / 10.0f)));
+                      (profile->angle_kp * ((float) observation->angle_d10 / 10.0f)));
 
         if ((abs_error <= profile->deadband_error) &&
             (abs_angle_d10 <= profile->angle_deadband_d10)) {
@@ -1667,14 +1640,14 @@ static uint8_t App_FollowTask(
                                APP_LINE_CONTROL_TRACKING;
         g_line_valid = 1U;
         g_line_lost_count = 0U;
-        g_line_target = observation.target;
-        g_line_error = observation.error;
+        g_line_target = observation->target;
+        g_line_error = observation->error;
         g_line_error_delta = error_delta;
         g_line_correction = correction * output_scale;
         g_line_left_cmd = left_cmd;
         g_line_right_cmd = right_cmd;
-        if (observation.new_frame != 0U) {
-            g_line_last_error = observation.error;
+        if (observation->new_frame != 0U) {
+            g_line_last_error = observation->error;
         }
         g_line_last_correction = correction;
     } else {
@@ -1709,9 +1682,247 @@ static uint8_t App_FollowTask(
         g_line_right_cmd = right_cmd;
         g_line_last_correction = correction;
     }
+}
 
+static uint8_t App_K230ObservationReadyForFollow(
+    const App_LineObservation *observation)
+{
+    if (observation->fresh == 0U) {
+        if (g_k230_line_timeout_latched == 0U) {
+            g_k230_line_timeout_latched = 1U;
+            g_k230_line_timeout_stop_count++;
+        }
+        g_k230_line_recovery_count = 0U;
+        g_k230_junction_active = 0U;
+        App_LineStopForState(APP_LINE_CONTROL_TIMEOUT_STOP);
+        return 0U;
+    }
+
+    if (g_k230_line_timeout_latched == 0U) {
+        return 1U;
+    }
+    if (observation->new_frame != 0U) {
+        if (observation->valid != 0U) {
+            if (g_k230_line_recovery_count < APP_K230_LINE_RECOVERY_FRAMES) {
+                g_k230_line_recovery_count++;
+            }
+        } else {
+            g_k230_line_recovery_count = 0U;
+        }
+    }
+
+    if (g_k230_line_recovery_count < APP_K230_LINE_RECOVERY_FRAMES) {
+        App_LineStopForState(APP_LINE_CONTROL_TIMEOUT_STOP);
+        return 0U;
+    }
+
+    g_k230_line_timeout_latched = 0U;
+    g_k230_line_recovery_count = 0U;
+    g_k230_line_recovery_total++;
+    g_line_lost_count = 0U;
+    g_line_last_error = observation->error;
+    g_line_last_correction = 0.0f;
+    Bsp_Motor_SpeedPidReset();
+    return 1U;
+}
+
+/*
+ * 通用 20 ms 巡线任务：CCD 每周期产生新观测；K230 以独立频率发布观测，
+ * 速度环在 freshness 窗口内复用最近值，但微分项只对新视觉帧计算。
+ */
+static uint8_t App_FollowTask(
+    const App_FollowProfile *profile,
+    float output_scale,
+    uint8_t source)
+{
+    App_LineObservation observation = {0};
+
+    if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
+        return 0U;
+    }
+
+    g_line_source = source;
+    if (source == APP_LINE_SOURCE_K230) {
+        App_PrepareK230LineObservation(&observation);
+
+        if (App_K230ObservationReadyForFollow(&observation) == 0U) {
+            Bsp_Gpio_ToggleHeartbeat();
+            return 1U;
+        }
+    } else {
+        App_ReadCcdLineObservation(&observation);
+    }
+
+    App_ApplyFollowObservation(profile, output_scale, source, &observation);
     Bsp_Gpio_ToggleHeartbeat();
     return 1U;
+}
+
+static float App_EncoderCountToCm(int32_t count)
+{
+    uint32_t magnitude;
+
+    if (count >= 0) {
+        return Bsp_Motor_EncoderTicksToCm((uint32_t) count);
+    }
+    /* 先加一再取反，避免 INT32_MIN 直接取负产生有符号溢出。 */
+    magnitude = (uint32_t) (-(count + 1)) + 1U;
+    return -Bsp_Motor_EncoderTicksToCm(magnitude);
+}
+
+static void App_FillDeliveryManeuverInput(
+    const App_LineObservation *observation,
+    DeliveryManeuver_Input *input)
+{
+    Bsp_Motor_EncoderSnapshot snapshot;
+
+    Bsp_Motor_GetEncoderSnapshot(&snapshot);
+    input->now_ms = Bsp_Time_GetMilliseconds();
+    input->left_position_cm = App_EncoderCountToCm(snapshot.left_count);
+    input->right_position_cm = App_EncoderCountToCm(snapshot.right_count);
+    input->line_fresh = observation->fresh;
+    input->line_new = observation->new_frame;
+    input->line_valid = observation->valid;
+    input->line_age_ms = g_k230_line_age_ms;
+    input->line_error_px = observation->error;
+    input->line_angle_d10 = observation->angle_d10;
+    input->line_quality = observation->quality;
+    input->direction_mask = observation->direction_mask;
+    input->junction_active = g_k230_junction_active;
+    input->imu_fresh = Bsp_Imu_IsHeadingFresh(APP_IMU_HEADING_MAX_AGE_MS);
+    input->heading_deg = Bsp_Imu_GetHeadingDeg();
+    input->speed_faults = Bsp_Motor_GetSpeedFaults();
+}
+
+static void App_UpdateDeliveryManeuverWatch(
+    const DeliveryManeuver_Output *output)
+{
+    g_delivery_maneuver_state = (uint8_t) g_delivery_maneuver.state;
+    g_delivery_maneuver_turn_phase = (uint8_t) g_delivery_maneuver.turn_phase;
+    g_delivery_maneuver_fault = (uint8_t) g_delivery_maneuver.fault;
+    g_delivery_maneuver_heading_target_deg =
+        g_delivery_maneuver.target_heading_deg;
+    g_delivery_maneuver_left_target_cm_s = output->left_target_cm_s;
+    g_delivery_maneuver_right_target_cm_s = output->right_target_cm_s;
+}
+
+static void App_ResetDeliveryManeuverWatch(void)
+{
+    g_delivery_maneuver_state = DELIVERY_MANEUVER_STATE_IDLE;
+    g_delivery_maneuver_turn_phase = DELIVERY_MANEUVER_TURN_SETTLE;
+    g_delivery_maneuver_fault = DELIVERY_MANEUVER_FAULT_NONE;
+    g_delivery_maneuver_heading_target_deg = 0.0f;
+    g_delivery_maneuver_left_target_cm_s = 0.0f;
+    g_delivery_maneuver_right_target_cm_s = 0.0f;
+}
+
+static void App_ApplyDeliveryManeuverOutput(
+    const DeliveryManeuver_Output *output,
+    const App_LineObservation *observation)
+{
+    if (output->command == DELIVERY_MANEUVER_COMMAND_FOLLOW_LINE) {
+        App_ApplyFollowObservation(
+            &g_k230_line_follow_profile,
+            output->follow_scale,
+            APP_LINE_SOURCE_K230,
+            observation);
+        return;
+    }
+    if (output->command == DELIVERY_MANEUVER_COMMAND_WHEEL_SPEED) {
+        Bsp_Motor_SetSpeedTargets(
+            output->left_target_cm_s,
+            output->right_target_cm_s);
+        Bsp_Motor_SpeedPidUpdate();
+        App_UpdateSpeedWatch();
+        g_line_control_state =
+            (g_delivery_maneuver.state == DELIVERY_MANEUVER_STATE_REACQUIRE) ?
+                APP_LINE_CONTROL_MANEUVER_REACQUIRE :
+                APP_LINE_CONTROL_MANEUVER_TURN;
+        g_line_valid = observation->valid;
+        g_line_target = observation->target;
+        g_line_error = observation->error;
+        g_line_error_delta = 0;
+        g_line_correction = 0.0f;
+        g_line_left_cmd = 0.0f;
+        g_line_right_cmd = 0.0f;
+        return;
+    }
+    App_LineStopForState(APP_LINE_CONTROL_WAIT_FRAME);
+}
+
+/*
+ * 模式 7 的统一控制点：每周期只消费一次 L 帧，先完成路线决策，再由巡线或
+ * 路口动作状态机取得唯一的电机控制权，避免 HOLD 后仍多走一个控制周期。
+ */
+static void App_DeliveryLineTask(void)
+{
+    App_LineObservation observation = {0};
+    DeliveryManeuver_Input input = {0};
+    DeliveryManeuver_Output output = {0};
+    uint8_t request_result;
+
+    if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
+        return;
+    }
+
+    g_line_source = APP_LINE_SOURCE_K230;
+    App_PrepareK230LineObservation(&observation);
+    App_DeliveryTaskUpdate(&observation);
+    App_FillDeliveryManeuverInput(&observation, &input);
+
+    if ((g_delivery_task.state == DELIVERY_STATE_HOLD) &&
+        (g_delivery_maneuver.state == DELIVERY_MANEUVER_STATE_IDLE)) {
+        if (DeliveryManeuver_Start(
+                &g_delivery_maneuver,
+                g_delivery_task.pending_decision,
+                &input) == 0U) {
+            DeliveryTask_FailPendingDecision(&g_delivery_task);
+        }
+    }
+
+    if (DeliveryManeuver_IsActive(&g_delivery_maneuver) != 0U) {
+        DeliveryManeuver_Update(&g_delivery_maneuver, &input, &output);
+
+        if (output.request_yaw_zero != 0U) {
+            request_result = (input.imu_fresh != 0U) ?
+                Bsp_Imu_ZeroYaw() : 0U;
+            DeliveryManeuver_ReportYawZero(
+                &g_delivery_maneuver,
+                request_result);
+        }
+        if (output.request_commit != 0U) {
+            request_result =
+                DeliveryTask_CommitPendingDecision(&g_delivery_task);
+            DeliveryManeuver_ReportCommit(
+                &g_delivery_maneuver,
+                request_result);
+        }
+        if (g_delivery_maneuver.state == DELIVERY_MANEUVER_STATE_FAULT) {
+            DeliveryTask_FailPendingDecision(&g_delivery_task);
+        }
+
+        App_ApplyDeliveryManeuverOutput(&output, &observation);
+        App_UpdateDeliveryWatch();
+        App_UpdateDeliveryManeuverWatch(&output);
+        Bsp_Gpio_ToggleHeartbeat();
+        return;
+    }
+
+    App_UpdateDeliveryManeuverWatch(&output);
+    if ((g_delivery_task.state == DELIVERY_STATE_IDLE) ||
+        (DeliveryTask_IsMotionAllowed(&g_delivery_task) != 0U)) {
+        if (App_K230ObservationReadyForFollow(&observation) != 0U) {
+            App_ApplyFollowObservation(
+                &g_k230_line_follow_profile,
+                1.0f,
+                APP_LINE_SOURCE_K230,
+                &observation);
+        }
+    } else {
+        /* IDENTIFY、TARGET_LOCKED、DECIDE 和 FAULT 均停车等待下一步事件。 */
+        App_LineStopForState(APP_LINE_CONTROL_WAIT_FRAME);
+    }
+    Bsp_Gpio_ToggleHeartbeat();
 }
 
 /* 基础联调模式：CCD 有效时以固定比例等速直行，无有效线立即主动停车。 */
@@ -1879,7 +2090,9 @@ static void App_ModeExit(uint8_t mode)
         (mode == APP_MODE_CIRCLE_FOLLOW) || (mode == APP_MODE_SQUARE_FOLLOW)) {
         Bsp_Motor_SpeedPidStop();
         if (mode == APP_MODE_LINE_FOLLOW) {
-            /* 停止或切换模式时同步关闭 K230 数字视觉，避免残留送药状态。 */
+            /* 先取消路口动作，再关闭 K230 数字视觉，避免模式退出后残留转向目标。 */
+            DeliveryManeuver_Reset(&g_delivery_maneuver);
+            App_ResetDeliveryManeuverWatch();
             DeliveryTask_Reset(&g_delivery_task);
             g_delivery_start_pending = 0U;
         }
@@ -1946,6 +2159,8 @@ static uint8_t App_ModeEnter(uint8_t mode)
             Bsp_Motor_SpeedPidReset();
             Bsp_Motor_EncoderReset();
             App_ResetLineState();
+            DeliveryManeuver_Reset(&g_delivery_maneuver);
+            App_ResetDeliveryManeuverWatch();
             g_line_source = APP_LINE_SOURCE_K230;
             if (g_delivery_start_pending == 0U) {
                 DeliveryTask_Init(&g_delivery_task);
@@ -2061,23 +2276,7 @@ static void App_ModeTask(uint8_t mode)
             }
             break;
         case APP_MODE_LINE_FOLLOW:
-            /* 送药识别或路线决策未允许运动时，模式 7 只保持安全停车。 */
-            if ((g_delivery_task.state != DELIVERY_STATE_IDLE) &&
-                (DeliveryTask_IsMotionAllowed(&g_delivery_task) == 0U)) {
-                App_DeliveryTaskUpdate();
-                Bsp_Motor_SpeedPidStop();
-                App_UpdateSpeedWatch();
-            } else {
-                /* K230 红线误差、角度和路口掩码驱动普通巡线。 */
-                (void) App_FollowTask(
-                    &g_k230_line_follow_profile, 1.0f, APP_LINE_SOURCE_K230);
-                App_DeliveryTaskUpdate();
-                if ((g_delivery_task.state != DELIVERY_STATE_IDLE) &&
-                    (DeliveryTask_IsMotionAllowed(&g_delivery_task) == 0U)) {
-                    Bsp_Motor_SpeedPidStop();
-                    App_UpdateSpeedWatch();
-                }
-            }
+            App_DeliveryLineTask();
             break;
         case APP_MODE_CCD_STRAIGHT:
             /* 只用 CCD 有效性控制固定直行/停车，不进行转向反馈。 */
@@ -2245,6 +2444,12 @@ uint8_t App_DeliveryStartIdentification(void)
     K230_DigitFrame stale_frame;
     uint8_t request_result;
 
+    if ((g_app_current_mode == APP_MODE_LINE_FOLLOW) &&
+        (g_speed_pid_initialized != 0U)) {
+        Bsp_Motor_SpeedPidStop();
+    }
+    DeliveryManeuver_Reset(&g_delivery_maneuver);
+    App_ResetDeliveryManeuverWatch();
     g_delivery_epoch++;
     if (g_delivery_epoch == 0U) {
         g_delivery_epoch = 1U;
@@ -2265,7 +2470,8 @@ uint8_t App_DeliveryStartIdentification(void)
 
 uint8_t App_DeliveryStartRoute(void)
 {
-    if (g_app_current_mode != APP_MODE_LINE_FOLLOW) {
+    if ((g_app_current_mode != APP_MODE_LINE_FOLLOW) ||
+        (DeliveryManeuver_IsActive(&g_delivery_maneuver) != 0U)) {
         return 0U;
     }
     return DeliveryTask_StartRoute(&g_delivery_task);
@@ -2273,6 +2479,12 @@ uint8_t App_DeliveryStartRoute(void)
 
 uint8_t App_DeliveryReset(void)
 {
+    if ((g_app_current_mode == APP_MODE_LINE_FOLLOW) &&
+        (g_speed_pid_initialized != 0U)) {
+        Bsp_Motor_SpeedPidStop();
+    }
+    DeliveryManeuver_Reset(&g_delivery_maneuver);
+    App_ResetDeliveryManeuverWatch();
     DeliveryTask_Reset(&g_delivery_task);
     g_delivery_start_pending = 0U;
     g_delivery_state = DELIVERY_STATE_IDLE;
@@ -2289,11 +2501,18 @@ uint8_t App_DeliveryReset(void)
 
 uint8_t App_DeliverySetRouteRegion(uint8_t region)
 {
+    if (DeliveryManeuver_IsActive(&g_delivery_maneuver) != 0U) {
+        return 0U;
+    }
     return DeliveryTask_SetRouteRegion(&g_delivery_task, region);
 }
 
 uint8_t App_DeliveryCommitPendingDecision(void)
 {
+    /* 路口动作执行期间只允许状态机在制动完成后提交，禁止调试接口提前跳过动作。 */
+    if (DeliveryManeuver_IsActive(&g_delivery_maneuver) != 0U) {
+        return 0U;
+    }
     return DeliveryTask_CommitPendingDecision(&g_delivery_task);
 }
 
@@ -2330,6 +2549,7 @@ void App_Init(void)
     g_delivery_start_pending = 0U;
     g_delivery_epoch = 0U;
     DeliveryTask_Init(&g_delivery_task);
+    DeliveryManeuver_Init(&g_delivery_maneuver);
     g_delivery_state = DELIVERY_STATE_IDLE;
     g_delivery_target_digit = 0U;
     g_delivery_target_locked = 0U;
@@ -2339,6 +2559,7 @@ void App_Init(void)
     g_delivery_visual_mode = K230_VISUAL_MODE_OFF;
     g_delivery_visual_command_pending = 0U;
     g_delivery_fault = 0U;
+    App_ResetDeliveryManeuverWatch();
     App_ResetLineState();
     App_ResetSquareState();
     Protocol_Tjc_SendResult(TJC_RESULT_STATE, APP_MODE_STOPPED, TJC_COMMAND_QUERY);
