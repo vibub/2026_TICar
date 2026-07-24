@@ -127,7 +127,7 @@ def create_uart(UART, FPIOA):
 
 
 def poll_uart_lines():
-    """非阻塞读取 CRLF 文本行，超长行丢弃到下一个换行符。"""
+    """非阻塞读取文本行，同时兼容 CR、LF 和 CRLF 结尾。"""
     global uart_rx_line, uart_rx_discard
     global uart_rx_byte_count, uart_rx_line_count, uart_last_line
 
@@ -139,14 +139,13 @@ def poll_uart_lines():
     uart_rx_byte_count += len(received)
     for byte in received:
         if uart_rx_discard:
-            if byte == 10:
+            if byte in (10, 13):
                 uart_rx_discard = False
                 uart_rx_line = bytearray()
             continue
 
-        if byte == 13:
-            continue
-        if byte == 10:
+        # 部分串口终端回车只发送 CR；CRLF 中第二个 LF 会因缓冲区为空而被忽略。
+        if byte in (10, 13):
             if len(uart_rx_line) != 0:
                 try:
                     decoded_line = uart_rx_line.decode()
@@ -480,9 +479,9 @@ def run_delivery_mode(
     clock = time.clock()
 
     print("K230比赛视觉启动：红线每帧，数字按V命令运行")
-    print("V命令必须从UART1 RX IO{}输入，ACK从TX IO{}输出".format(
+    print("V命令必须从UART2 RX IO{}输入，ACK从TX IO{}输出".format(
         K230_UART_RX_IO, K230_UART_TX_IO))
-    print("CanMV IDE USB终端输入不会进入该硬件UART；命令必须以真实LF结尾")
+    print("CanMV IDE USB终端输入不会进入该硬件UART；命令支持CR、LF或CRLF结尾")
 
     while True:
         os.exitpoint()
