@@ -4,8 +4,8 @@ import sys
 import time
 
 
-K230_UART_TX_IO = 3
-K230_UART_RX_IO = 4
+K230_UART_TX_IO = 44
+K230_UART_RX_IO = 45
 
 # DELIVERY 为比赛视觉主程序；LINE 和 TARGET 保留独立联调入口。
 RUN_MODE = "DELIVERY"
@@ -111,11 +111,11 @@ def create_uart(UART, FPIOA):
 
     print("S10: 初始化UART")
     fpioa = FPIOA()
-    fpioa.set_function(K230_UART_TX_IO, FPIOA.UART1_TXD)
-    fpioa.set_function(K230_UART_RX_IO, FPIOA.UART1_RXD)
+    fpioa.set_function(K230_UART_TX_IO, FPIOA.UART2_TXD)
+    fpioa.set_function(K230_UART_RX_IO, FPIOA.UART2_RXD)
 
     result = UART(
-        UART.UART1,
+        UART.UART2,
         baudrate=115200,
         bits=UART.EIGHTBITS,
         parity=UART.PARITY_NONE,
