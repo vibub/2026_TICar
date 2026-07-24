@@ -200,6 +200,16 @@ def parse_visual_command(line):
     return VisualCommand(mode, target_digit, route_region, epoch)
 
 
+def is_locked_off_command(command):
+    """判断 OFF 命令是否表示目标已锁定、仅停止推理并冻结显示。"""
+    if command is None:
+        return False
+    return (
+        int(command.mode) == VISUAL_MODE_OFF and
+        1 <= int(command.target_digit) <= 8
+    )
+
+
 def format_digit_frame(
     valid,
     digit,

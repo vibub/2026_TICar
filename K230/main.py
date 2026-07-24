@@ -245,6 +245,7 @@ def draw_delivery_overlay(
     command,
     last_yolo_result,
     last_yolo_result_ms,
+    locked_overlay,
     now_ms,
     max_line_send_gap_ms,
     max_digit_inference_ms,
@@ -259,7 +260,8 @@ def draw_delivery_overlay(
         # 与官方示例一致，由YOLO11根据rgb888p_size/display_size绘制真实检测框。
         if last_yolo_result is not None and yolo is not None:
             result_age_ms = time.ticks_diff(now_ms, last_yolo_result_ms)
-            if 0 <= result_age_ms <= DIGIT_OVERLAY_HOLD_MS:
+            # 目标锁定后停止推理，但冻结最后一次真实检测框作为操作反馈。
+            if locked_overlay or 0 <= result_age_ms <= DIGIT_OVERLAY_HOLD_MS:
                 yolo.draw_result(last_yolo_result, osd)
 
         white = (255, 255, 255)
@@ -429,6 +431,7 @@ def run_delivery_mode(
     parse_visual_command,
     format_digit_frame,
     is_digit_inference_due,
+    is_locked_off_command,
     constants,
 ):
     """比赛视觉循环：红线优先，按 MSPM0 状态低频运行数字 YOLO。"""
@@ -453,6 +456,7 @@ def run_delivery_mode(
     last_osd_ms = time.ticks_ms()
     last_yolo_result = None
     last_yolo_result_ms = 0
+    locked_overlay = False
     max_line_send_gap_ms = 0
     max_digit_inference_ms = 0
     clock = time.clock()
@@ -466,19 +470,29 @@ def run_delivery_mode(
         os.exitpoint()
         clock.tick()
 
-        previous_mode = command.mode
-        previous_epoch = command.epoch
+        previous_command = command
         command = process_visual_commands(
             command,
             pharmacy_consensus,
             route_consensus,
             parse_visual_command,
         )
-        if (command.mode == constants["VISUAL_MODE_OFF"] or
-                command.epoch != previous_epoch or
-                command.mode != previous_mode):
-            last_yolo_result = None
-            last_yolo_result_ms = 0
+        command_changed = (
+            command.mode != previous_command.mode or
+            command.target_digit != previous_command.target_digit or
+            command.route_region != previous_command.route_region or
+            command.epoch != previous_command.epoch
+        )
+        locked_overlay = is_locked_off_command(command)
+        if command_changed:
+            # 锁定 OFF 保留刚确认的框；普通关闭或新任务必须清除上一轮结果。
+            preserve_locked_result = (
+                locked_overlay and
+                command.epoch == previous_command.epoch
+            )
+            if not preserve_locked_result:
+                last_yolo_result = None
+                last_yolo_result_ms = 0
 
         # 红线始终优先运行和发送，数字推理不能跳过本轮传统视觉更新。
         vision_frame = pipeline.capture_vision_frame()
@@ -537,7 +551,8 @@ def run_delivery_mode(
                         [int(class_id) for class_id in yolo_result[1]],
                         [float(score) for score in yolo_result[2]],
                     )
-                    last_yolo_result_ms = now_ms
+                    # 从推理完成时开始计算显示寿命，避免慢推理让新框立即过期。
+                    last_yolo_result_ms = time.ticks_ms()
                 detection = detections[0] if detections else None
                 flags = 0
                 consensus = (
@@ -609,6 +624,7 @@ def run_delivery_mode(
                 command,
                 last_yolo_result,
                 last_yolo_result_ms,
+                locked_overlay,
                 osd_now_ms,
                 max_line_send_gap_ms,
                 max_digit_inference_ms,
@@ -757,6 +773,7 @@ try:
             VisualCommand,
             format_digit_frame,
             is_digit_inference_due,
+            is_locked_off_command,
             make_detections,
             parse_visual_command,
         )
@@ -782,6 +799,7 @@ try:
             parse_visual_command,
             format_digit_frame,
             is_digit_inference_due,
+            is_locked_off_command,
             {
                 "VISUAL_MODE_OFF": VISUAL_MODE_OFF,
                 "VISUAL_MODE_TARGET": VISUAL_MODE_TARGET,

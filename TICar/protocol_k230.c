@@ -276,8 +276,7 @@ static void Protocol_K230_PublishTarget(const K230_TargetFrame *frame)
     g_k230_link_alive = 1U;
     g_k230_target_valid = ((frame->detected != 0U) &&
                            (frame->confidence >= K230_MIN_CONFIDENCE)) ? 1U : 0U;
-    Bsp_Uart_K230_SendString(
-        (frame->detected != 0U) ? "ACK,T\r\n" : "ACK,N\r\n");
+    /* T/N 是周期遥测帧；合法数据不逐帧确认，避免反向串口被 ACK 占满。 */
 }
 
 static void Protocol_K230_PublishLine(const K230_LineFrame *frame)
@@ -289,7 +288,7 @@ static void Protocol_K230_PublishLine(const K230_LineFrame *frame)
     g_k230_line_alive = 1U;
     g_k230_line_control_valid = ((frame->valid != 0U) &&
                                  (frame->quality >= K230_LINE_MIN_QUALITY)) ? 1U : 0U;
-    Bsp_Uart_K230_SendString("ACK,L\r\n");
+    /* L 帧高频上报且不会重传；仅可靠的 V 控制命令保留应答。 */
 }
 
 static void Protocol_K230_PublishDigit(const K230_DigitFrame *frame)
@@ -299,7 +298,7 @@ static void Protocol_K230_PublishDigit(const K230_DigitFrame *frame)
     g_k230_digit_frame_count++;
     g_k230_last_digit_frame_ms = Bsp_Time_GetMilliseconds();
     g_k230_digit_alive = 1U;
-    Bsp_Uart_K230_SendString("ACK,D\r\n");
+    /* D 帧只更新数字邮箱和 freshness，不再向 K230 发送无用途的逐帧 ACK。 */
 }
 
 static void Protocol_K230_ProcessCompleteLine(void)

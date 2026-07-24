@@ -22,6 +22,7 @@ from digit_logic import (  # noqa: E402
     clamp_box_xywh,
     format_digit_frame,
     is_digit_inference_due,
+    is_locked_off_command,
     make_detections,
     parse_visual_command,
     side_from_center,
@@ -105,6 +106,13 @@ class DigitLogicTest(unittest.TestCase):
         self.assertEqual((command.mode, command.target_digit, command.route_region, command.epoch), (2, 6, 3, 17))
         self.assertIsNone(parse_visual_command("V,9,6,3,17"))
         self.assertIsNone(parse_visual_command("V,2,9,3,17"))
+
+    def test_locked_off_command_preserves_only_locked_target(self):
+        self.assertTrue(is_locked_off_command(parse_visual_command("V,0,6,0,17")))
+        self.assertFalse(is_locked_off_command(parse_visual_command("V,0,0,0,17")))
+        self.assertFalse(is_locked_off_command(parse_visual_command("V,1,0,0,17")))
+        self.assertFalse(is_locked_off_command(parse_visual_command("V,2,6,2,17")))
+        self.assertFalse(is_locked_off_command(None))
 
     def test_digit_frame_stays_within_protocol_buffer(self):
         frame = format_digit_frame(

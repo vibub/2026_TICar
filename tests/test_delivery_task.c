@@ -99,10 +99,33 @@ static int test_target_lock_survives_conflicting_digit(void)
     CHECK(task.target_locked == 1U);
     CHECK(task.target_digit == 6U);
     CHECK(s_sent_mode == K230_VISUAL_MODE_OFF);
+    CHECK(s_sent_target == 6U);
+    CHECK(s_sent_region == K230_ROUTE_REGION_PHARMACY);
+    CHECK(s_sent_epoch == 7U);
 
     input.digit.digit = 3U;
     DeliveryTask_Update(&task, &input);
     CHECK(task.target_digit == 6U);
+    return 1;
+}
+
+static int test_reset_sends_plain_off_command(void)
+{
+    DeliveryTask task;
+
+    reset_harness();
+    DeliveryTask_Init(&task);
+    task.epoch = 8U;
+    task.target_digit = 6U;
+    task.target_locked = 1U;
+    task.state = DELIVERY_STATE_TARGET_LOCKED;
+
+    DeliveryTask_Reset(&task);
+    CHECK(task.state == DELIVERY_STATE_IDLE);
+    CHECK(s_sent_mode == K230_VISUAL_MODE_OFF);
+    CHECK(s_sent_target == 0U);
+    CHECK(s_sent_region == K230_ROUTE_REGION_PHARMACY);
+    CHECK(s_sent_epoch == 0U);
     return 1;
 }
 
@@ -222,6 +245,7 @@ static int test_visual_command_resends_until_ack(void)
 int main(void)
 {
     if (!test_target_lock_survives_conflicting_digit() ||
+        !test_reset_sends_plain_off_command() ||
         !test_route_uses_target_and_region_commands() ||
         !test_middle_target_selects_observed_side() ||
         !test_line_timeout_enters_fault() ||

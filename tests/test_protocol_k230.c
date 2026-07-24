@@ -95,6 +95,25 @@ static int test_target_parser_compatibility(void)
     return 1;
 }
 
+static int test_target_publish_is_one_way_telemetry(void)
+{
+    K230_TargetFrame frame;
+
+    reset_harness();
+    feed_text("N\n");
+    CHECK(Protocol_K230_TakeLatestFrame(&frame) == 1U);
+    CHECK(frame.detected == 0U);
+    CHECK(s_tx_length == 0U);
+
+    feed_text("T,-12,8,90\n");
+    CHECK(Protocol_K230_TakeLatestFrame(&frame) == 1U);
+    CHECK(frame.detected == 1U);
+    CHECK(frame.error_x == -12);
+    CHECK(frame.error_y == 8);
+    CHECK(s_tx_length == 0U);
+    return 1;
+}
+
 static int test_line_parser_boundaries(void)
 {
     K230_LineFrame frame;
@@ -129,7 +148,7 @@ static int test_line_publish_and_mailbox(void)
     CHECK(g_k230_line_alive == 1U);
     CHECK(g_k230_line_control_valid == 1U);
     CHECK(g_k230_last_line_frame_ms == 25U);
-    CHECK(strcmp(s_tx, "ACK,L\r\n") == 0);
+    CHECK(s_tx_length == 0U);
     CHECK(Protocol_K230_TakeLatestLineFrame(&frame) == 1U);
     CHECK(frame.error_x == 18);
     CHECK(frame.angle_d10 == 35);
@@ -193,8 +212,7 @@ static int test_overlong_line_resynchronizes(void)
     CHECK(g_k230_invalid_frame_count == 1U);
     CHECK(g_k230_line_frame_count == 1U);
     CHECK(g_k230_line_alive == 1U);
-    CHECK(strstr(s_tx, "ERR,FRAME\r\n") != NULL);
-    CHECK(strstr(s_tx, "ACK,L\r\n") != NULL);
+    CHECK(strcmp(s_tx, "ERR,FRAME\r\n") == 0);
     return 1;
 }
 
@@ -251,7 +269,7 @@ static int test_digit_publish_mailbox_and_timeout(void)
     CHECK(g_k230_digit_frame_count == 1U);
     CHECK(g_k230_digit_alive == 1U);
     CHECK(g_k230_last_digit_frame_ms == 20U);
-    CHECK(strcmp(s_tx, "ACK,D\r\n") == 0);
+    CHECK(s_tx_length == 0U);
     CHECK(Protocol_K230_TakeLatestDigitFrame(&frame) == 1U);
     CHECK(frame.digit == 6U);
     CHECK(frame.width == 60U);
@@ -307,12 +325,14 @@ static int test_mixed_channels_keep_independent_mailboxes(void)
     CHECK(line.error_x == 2);
     CHECK(digit.digit == 4U);
     CHECK(target.error_y == -6);
+    CHECK(s_tx_length == 0U);
     return 1;
 }
 
 int main(void)
 {
     if (!test_target_parser_compatibility() ||
+        !test_target_publish_is_one_way_telemetry() ||
         !test_line_parser_boundaries() ||
         !test_line_publish_and_mailbox() ||
         !test_invalid_line_stays_alive_but_not_controllable() ||
