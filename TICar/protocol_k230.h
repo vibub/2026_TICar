@@ -9,7 +9,7 @@
 
 #define K230_PROTOCOL_LINE_SIZE 32U /* 含字符串结束符的最大行缓冲区大小。 */
 #define K230_TARGET_LINK_TIMEOUT_MS 300U /* 靶标 T/N 帧超过该时间未更新即超时。 */
-#define K230_LINE_LINK_TIMEOUT_MS 200U /* 红线 L 帧超过该时间未更新即立即停车。 */
+#define K230_LINE_LINK_TIMEOUT_MS 800U /* 红线 L 帧超过该时间未更新即立即停车。 */
 #define K230_DIGIT_LINK_TIMEOUT_MS 600U /* 数字 D 帧低频发布，使用独立 freshness。 */
 #define K230_LINK_TIMEOUT_MS K230_TARGET_LINK_TIMEOUT_MS /* 兼容原有靶标超时名称。 */
 #define K230_MIN_CONFIDENCE 70U /* 低于该置信度的 T 帧不参与云台控制。 */

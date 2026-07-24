@@ -54,7 +54,7 @@
 /* K230 使用 320×240 图像；图像右偏和右前方角度均为正，摄像头不镜像。 */
 #define APP_K230_LINE_BASE_SPEED 0.25f
 #define APP_K230_LINE_KP 0.0015f
-#define APP_K230_LINE_KD 0.0010f
+#define APP_K230_LINE_KD 0.0100f
 #define APP_K230_LINE_ANGLE_KP 0.0020f
 #define APP_K230_LINE_STEER_SIGN 1.0f
 #define APP_K230_LINE_STEER_LIMIT 0.120f
