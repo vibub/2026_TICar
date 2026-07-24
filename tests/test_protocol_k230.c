@@ -210,6 +210,106 @@ static int test_line_age(void)
     return 1;
 }
 
+static int test_digit_parser_boundaries(void)
+{
+    K230_DigitFrame frame;
+
+    CHECK(Protocol_K230_ParseDigitFrame(
+              "D,1,8,500,120,80,60,2,100,15", &frame) == 1U);
+    CHECK(frame.valid == 1U);
+    CHECK(frame.digit == 8U);
+    CHECK(frame.x == 500U);
+    CHECK(frame.side == K230_DIGIT_SIDE_RIGHT);
+    CHECK(frame.confidence == 100U);
+    CHECK(frame.flags == 15U);
+
+    CHECK(Protocol_K230_ParseDigitFrame(
+              "D,0,0,0,0,0,0,0,0,8", &frame) == 1U);
+    CHECK(Protocol_K230_ParseDigitFrame(
+              "D,0,6,0,0,0,0,0,0,8", &frame) == 0U);
+    CHECK(Protocol_K230_ParseDigitFrame(
+              "D,1,9,0,0,20,20,0,80,1", &frame) == 0U);
+    CHECK(Protocol_K230_ParseDigitFrame(
+              "D,1,6,620,0,30,20,2,80,3", &frame) == 0U);
+    CHECK(Protocol_K230_ParseDigitFrame(
+              "D,1,6,0,350,20,20,1,80,3", &frame) == 0U);
+    CHECK(Protocol_K230_ParseDigitFrame(
+              "D,1,6,0,0,20,20,3,80,3", &frame) == 0U);
+    CHECK(Protocol_K230_ParseDigitFrame(
+              "D,1,6,0,0,20,20,1,80,0", &frame) == 0U);
+    return 1;
+}
+
+static int test_digit_publish_mailbox_and_timeout(void)
+{
+    K230_DigitFrame frame;
+
+    reset_harness();
+    s_now_ms = 20U;
+    feed_text("D,1,6,480,100,60,80,2,91,15\n");
+
+    CHECK(g_k230_digit_frame_count == 1U);
+    CHECK(g_k230_digit_alive == 1U);
+    CHECK(g_k230_last_digit_frame_ms == 20U);
+    CHECK(strcmp(s_tx, "ACK,D\r\n") == 0);
+    CHECK(Protocol_K230_TakeLatestDigitFrame(&frame) == 1U);
+    CHECK(frame.digit == 6U);
+    CHECK(frame.width == 60U);
+    CHECK(Protocol_K230_TakeLatestDigitFrame(&frame) == 0U);
+
+    /* 高频 L 帧不能刷新数字 freshness。 */
+    s_now_ms = 500U;
+    feed_text("L,1,0,0,90,2\n");
+    CHECK(g_k230_digit_alive == 1U);
+    s_now_ms = 620U;
+    Protocol_K230_Task();
+    CHECK(g_k230_digit_alive == 0U);
+    CHECK(g_k230_digit_timeout_count == 1U);
+    CHECK(g_k230_line_alive == 1U);
+    return 1;
+}
+
+static int test_visual_command_and_ack(void)
+{
+    reset_harness();
+    CHECK(Protocol_K230_SendVisualCommand(
+              K230_VISUAL_MODE_TARGET, 6U,
+              K230_ROUTE_REGION_FAR, 17U) == 1U);
+    CHECK(strcmp(s_tx, "V,2,6,3,17\r\n") == 0);
+    CHECK(Protocol_K230_SendVisualCommand(3U, 6U, 3U, 17U) == 0U);
+
+    feed_text("A,V,2,6,3,17\n");
+    CHECK(g_k230_visual_ack_count == 1U);
+    CHECK(g_k230_visual_ack_mode == K230_VISUAL_MODE_TARGET);
+    CHECK(g_k230_visual_ack_target_digit == 6U);
+    CHECK(g_k230_visual_ack_route_region == K230_ROUTE_REGION_FAR);
+    CHECK(g_k230_visual_ack_epoch == 17U);
+    CHECK(Protocol_K230_IsVisualCommandApplied(2U, 6U, 3U, 17U) == 1U);
+    CHECK(Protocol_K230_IsVisualCommandApplied(2U, 6U, 2U, 17U) == 0U);
+    return 1;
+}
+
+static int test_mixed_channels_keep_independent_mailboxes(void)
+{
+    K230_LineFrame line;
+    K230_DigitFrame digit;
+    K230_TargetFrame target;
+
+    reset_harness();
+    feed_text(
+        "L,1,2,3,90,2\n"
+        "D,1,4,10,20,30,40,1,88,7\n"
+        "T,5,-6,80\n");
+
+    CHECK(Protocol_K230_TakeLatestLineFrame(&line) == 1U);
+    CHECK(Protocol_K230_TakeLatestDigitFrame(&digit) == 1U);
+    CHECK(Protocol_K230_TakeLatestFrame(&target) == 1U);
+    CHECK(line.error_x == 2);
+    CHECK(digit.digit == 4U);
+    CHECK(target.error_y == -6);
+    return 1;
+}
+
 int main(void)
 {
     if (!test_target_parser_compatibility() ||
@@ -218,7 +318,11 @@ int main(void)
         !test_invalid_line_stays_alive_but_not_controllable() ||
         !test_independent_timeouts() ||
         !test_overlong_line_resynchronizes() ||
-        !test_line_age()) {
+        !test_line_age() ||
+        !test_digit_parser_boundaries() ||
+        !test_digit_publish_mailbox_and_timeout() ||
+        !test_visual_command_and_ack() ||
+        !test_mixed_channels_keep_independent_mailboxes()) {
         return 1;
     }
 

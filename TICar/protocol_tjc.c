@@ -90,6 +90,24 @@ static void Protocol_Tjc_ProcessCommand(uint8_t command)
     if (command == TJC_COMMAND_QUERY) {
         g_tjc_valid_command_count++;
         Protocol_Tjc_SendResult(TJC_RESULT_STATE, App_GetCurrentMode(), command);
+    } else if (command == TJC_COMMAND_DELIVERY_IDENTIFY) {
+        g_tjc_valid_command_count++;
+        Protocol_Tjc_SendResult(
+            (App_DeliveryStartIdentification() != 0U) ?
+                TJC_RESULT_TASK_ACCEPTED : TJC_RESULT_TASK_REJECTED,
+            App_GetCurrentMode(), command);
+    } else if (command == TJC_COMMAND_DELIVERY_DEPART) {
+        g_tjc_valid_command_count++;
+        Protocol_Tjc_SendResult(
+            (App_DeliveryStartRoute() != 0U) ?
+                TJC_RESULT_TASK_ACCEPTED : TJC_RESULT_TASK_REJECTED,
+            App_GetCurrentMode(), command);
+    } else if (command == TJC_COMMAND_DELIVERY_RESET) {
+        g_tjc_valid_command_count++;
+        Protocol_Tjc_SendResult(
+            (App_DeliveryReset() != 0U) ?
+                TJC_RESULT_STOPPED : TJC_RESULT_TASK_REJECTED,
+            App_GetCurrentMode(), command);
     } else if (command <= TJC_COMMAND_LAST_MODE) {
         g_tjc_valid_command_count++;
         (void) App_RequestMode(command);

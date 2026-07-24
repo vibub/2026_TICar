@@ -34,4 +34,19 @@ uint8_t App_RequestMode(uint8_t mode);
  */
 uint8_t App_GetCurrentMode(void);
 
+/** 启动一次药房数字识别任务，成功后复用模式 7 的红线控制。 */
+uint8_t App_DeliveryStartIdentification(void);
+
+/** 目标数字锁定后允许进入路线跟随。 */
+uint8_t App_DeliveryStartRoute(void);
+
+/** 复位当前送药任务并清除已锁定目标。 */
+uint8_t App_DeliveryReset(void);
+
+/** 更新当前路线区域并同步给 K230。 */
+uint8_t App_DeliverySetRouteRegion(uint8_t region);
+
+/** 转向执行完成后提交当前路线决策。 */
+uint8_t App_DeliveryCommitPendingDecision(void);
+
 #endif
