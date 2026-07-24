@@ -45,6 +45,8 @@ JUNCTION_CENTER_GATE_PX = 24
 JUNCTION_FORWARD_HALF_WIDTH = 22
 JUNCTION_FORWARD_HEIGHT = 54
 JUNCTION_FORWARD_MIN_PIXELS = 18
+# 前向红线必须明显越过横线向画面上方延伸，避免把 T 字横线自身判成前方。
+JUNCTION_FORWARD_MIN_REACH_PX = 24
 
 DIRECTION_LEFT = 0x01
 DIRECTION_FRONT = 0x02
@@ -448,4 +450,10 @@ def _has_forward_line(img, thresholds, junction_y, center_x):
         area_threshold=JUNCTION_FORWARD_MIN_PIXELS,
         merge=True,
     )
-    return len(blobs) > 0
+
+    # 前向 ROI 会包含横线靠上的一部分，不能仅凭出现红色连通域就判定为十字。
+    minimum_top = int(junction_y) - JUNCTION_FORWARD_MIN_REACH_PX
+    for blob in blobs:
+        if int(blob.rect()[1]) <= minimum_top:
+            return True
+    return False
