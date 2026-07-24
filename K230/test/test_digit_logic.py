@@ -19,7 +19,7 @@ from digit_logic import (  # noqa: E402
     SIDE_RIGHT,
     DigitConsensus,
     DigitDetection,
-    clamp_box_xyxy,
+    clamp_box_xywh,
     format_digit_frame,
     is_digit_inference_due,
     make_detections,
@@ -31,10 +31,10 @@ from digit_logic import (  # noqa: E402
 class DigitLogicTest(unittest.TestCase):
     def test_box_is_clipped_to_ai_frame(self):
         self.assertEqual(
-            clamp_box_xyxy((-5, -2, 1000, 500)),
+            clamp_box_xywh((-5, -2, 1000, 500)),
             (0, 0, IMAGE_WIDTH, IMAGE_HEIGHT),
         )
-        self.assertIsNone(clamp_box_xyxy((1, 2, 0, 10)))
+        self.assertIsNone(clamp_box_xywh((1, 2, 0, 10)))
 
     def test_side_uses_corrected_ai_coordinates(self):
         self.assertEqual(side_from_center(100), SIDE_LEFT)
@@ -42,8 +42,10 @@ class DigitLogicTest(unittest.TestCase):
         self.assertEqual(side_from_center(540), SIDE_RIGHT)
 
     def test_yolo_results_keep_class_ids_and_filter_target(self):
+        # CanMV 当前三数组接口的框格式为 x、y、width、height；
+        # 右侧框会出现 x > width，必须仍然保留为有效检测。
         result = (
-            [[20, 30, 80, 80], [480, 30, 560, 110]],
+            [[20, 30, 80, 80], [480, 30, 80, 80]],
             [0, 5],
             [0.91, 0.95],
         )

@@ -101,28 +101,29 @@ def normalize_yolo_result(result, labels):
     return detections
 
 
-def clamp_box_xyxy(box, frame_width=IMAGE_WIDTH, frame_height=IMAGE_HEIGHT):
-    """把 YOLO 返回的 xyxy 框裁剪到 AI 画面，并转换为 xywh。"""
+def clamp_box_xywh(box, frame_width=IMAGE_WIDTH, frame_height=IMAGE_HEIGHT):
+    """裁剪 CanMV YOLO 三数组结果中的 xywh 框，非法框返回 None。"""
     if box is None or len(box) < 4:
         return None
     try:
-        x1 = int(box[0])
-        y1 = int(box[1])
-        x2 = int(box[2])
-        y2 = int(box[3])
+        x = int(box[0])
+        y = int(box[1])
+        width = int(box[2])
+        height = int(box[3])
     except (TypeError, ValueError, IndexError):
         return None
 
-    # CanMV YOLO11 的 detect 结果使用左上角和右下角坐标，不是宽高。
-    if (x2 <= x1) or (y2 <= y1):
+    # 当前固件返回 `(boxes, class_ids, scores)`，其中每个 box 已是 xywh。
+    if width <= 0 or height <= 0:
         return None
-    if (x2 <= 0) or (y2 <= 0) or (x1 >= frame_width) or (y1 >= frame_height):
+    if ((x + width <= 0) or (y + height <= 0) or
+            x >= frame_width or y >= frame_height):
         return None
 
-    x1 = max(0, min(frame_width - 1, x1))
-    y1 = max(0, min(frame_height - 1, y1))
-    x2 = max(x1 + 1, min(frame_width, x2))
-    y2 = max(y1 + 1, min(frame_height, y2))
+    x1 = max(0, min(frame_width - 1, x))
+    y1 = max(0, min(frame_height - 1, y))
+    x2 = max(x1 + 1, min(frame_width, x + width))
+    y2 = max(y1 + 1, min(frame_height, y + height))
     return x1, y1, x2 - x1, y2 - y1
 
 
@@ -142,7 +143,7 @@ def make_detections(result, labels, min_confidence, target_digit=None):
     for box, class_id, score in normalize_yolo_result(result, labels):
         if score < min_confidence:
             continue
-        clipped = clamp_box_xyxy(box)
+        clipped = clamp_box_xywh(box)
         if clipped is None:
             continue
         digit = int(labels[class_id])

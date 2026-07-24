@@ -243,18 +243,24 @@ def _draw_osd_text(osd, x, y, text, color):
 def draw_delivery_overlay(
     line_result,
     command,
-    last_detection,
-    last_detection_ms,
+    last_yolo_result,
+    last_yolo_result_ms,
     now_ms,
     max_line_send_gap_ms,
     max_digit_inference_ms,
 ):
-    """把红线、数字和 UART 状态统一重画到 800×480 OSD。"""
+    """使用YOLO原生绘制叠加数字框，再补充红线和UART状态。"""
     global osd_error_logged
 
     try:
         osd = pipeline.osd_img
         pipeline.clear_osd()
+
+        # 与官方示例一致，由YOLO11根据rgb888p_size/display_size绘制真实检测框。
+        if last_yolo_result is not None and yolo is not None:
+            result_age_ms = time.ticks_diff(now_ms, last_yolo_result_ms)
+            if 0 <= result_age_ms <= DIGIT_OVERLAY_HOLD_MS:
+                yolo.draw_result(last_yolo_result, osd)
 
         white = (255, 255, 255)
         green = (0, 255, 0)
@@ -330,33 +336,6 @@ def draw_delivery_overlay(
             ),
             white,
         )
-
-        # 数字推理只有约 5 Hz，缓存框在 TTL 内每次 OSD 刷新时重新绘制。
-        if last_detection is not None:
-            detection_age_ms = time.ticks_diff(now_ms, last_detection_ms)
-            if 0 <= detection_age_ms <= DIGIT_OVERLAY_HOLD_MS:
-                draw_x = _scale_coordinate(
-                    last_detection.x, AI_SIZE[0], DISPLAY_SIZE[0])
-                draw_y = _scale_coordinate(
-                    last_detection.y, AI_SIZE[1], DISPLAY_SIZE[1])
-                draw_w = max(1, _scale_coordinate(
-                    last_detection.width, AI_SIZE[0], DISPLAY_SIZE[0]))
-                draw_h = max(1, _scale_coordinate(
-                    last_detection.height, AI_SIZE[1], DISPLAY_SIZE[1]))
-                osd.draw_rectangle(
-                    draw_x, draw_y, draw_w, draw_h,
-                    color=yellow, thickness=3,
-                )
-                label_y = max(126, draw_y - 24)
-                _draw_osd_text(
-                    osd, draw_x, label_y,
-                    "D{} S{} C{}".format(
-                        last_detection.digit,
-                        last_detection.side,
-                        int(last_detection.confidence * 100),
-                    ),
-                    yellow,
-                )
 
         pipeline.show_osd()
         osd_error_logged = False
@@ -472,8 +451,8 @@ def run_delivery_mode(
     last_line_send_ms = time.ticks_ms()
     last_digit_run_ms = time.ticks_ms()
     last_osd_ms = time.ticks_ms()
-    last_detection = None
-    last_detection_ms = 0
+    last_yolo_result = None
+    last_yolo_result_ms = 0
     max_line_send_gap_ms = 0
     max_digit_inference_ms = 0
     clock = time.clock()
@@ -498,8 +477,8 @@ def run_delivery_mode(
         if (command.mode == constants["VISUAL_MODE_OFF"] or
                 command.epoch != previous_epoch or
                 command.mode != previous_mode):
-            last_detection = None
-            last_detection_ms = 0
+            last_yolo_result = None
+            last_yolo_result_ms = 0
 
         # 红线始终优先运行和发送，数字推理不能跳过本轮传统视觉更新。
         vision_frame = pipeline.capture_vision_frame()
@@ -551,6 +530,14 @@ def run_delivery_mode(
                     DIGIT_CONFIDENCE_THRESHOLD,
                     target_filter,
                 )
+                if len(yolo_result[0]) != 0:
+                    # 复制模型原始三数组结果，OSD直接复用示例程序的draw_result。
+                    last_yolo_result = (
+                        [list(box) for box in yolo_result[0]],
+                        [int(class_id) for class_id in yolo_result[1]],
+                        [float(score) for score in yolo_result[2]],
+                    )
+                    last_yolo_result_ms = now_ms
                 detection = detections[0] if detections else None
                 flags = 0
                 consensus = (
@@ -560,8 +547,6 @@ def run_delivery_mode(
                 )
 
                 if detection is not None:
-                    last_detection = detection
-                    last_detection_ms = now_ms
                     flags |= constants["DIGIT_FLAG_VALID"]
                     if target_filter in (None, 0) or detection.digit == target_filter:
                         flags |= constants["DIGIT_FLAG_TARGET_MATCH"]
@@ -589,7 +574,7 @@ def run_delivery_mode(
                         flags |= constants["DIGIT_FLAG_LOCKED"]
                     uart.write(format_digit_frame(False, 0, 0, 0, 0, 0, 0, 0, flags))
 
-                # DELIVERY 模式由统一 OSD 使用缓存框重画，避免低频 YOLO 框闪烁。
+                # 原始结果缓存到下一次推理，避免低频YOLO框在OSD刷新时闪烁。
             except BaseException as error:
                 uart.write(
                     format_digit_frame(
@@ -622,8 +607,8 @@ def run_delivery_mode(
             draw_delivery_overlay(
                 line_result,
                 command,
-                last_detection,
-                last_detection_ms,
+                last_yolo_result,
+                last_yolo_result_ms,
                 osd_now_ms,
                 max_line_send_gap_ms,
                 max_digit_inference_ms,
