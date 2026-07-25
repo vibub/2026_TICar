@@ -8,6 +8,8 @@
  */
 #include "app_main.h"
 
+#include <stddef.h>
+
 #include "app_config.h"
 #include "bsp_ccd.h"
 #include "bsp_gpio.h"
