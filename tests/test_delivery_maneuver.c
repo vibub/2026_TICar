@@ -88,14 +88,21 @@ static int test_left_turn_full_path(void)
 
     input.heading_deg = 88.0f;
     update_at(&maneuver, &input, &output, 550U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_TURN);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_WHEEL_SPEED);
+
+    /* IMU 到角后还必须具有足够编码器位移，防止航向跳变导致约 10°提前结束。 */
+    input.left_position_cm = 14.0f;
+    input.right_position_cm = 26.4f;
     update_at(&maneuver, &input, &output, 570U);
     update_at(&maneuver, &input, &output, 590U);
+    update_at(&maneuver, &input, &output, 610U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_REACQUIRE);
 
     input.line_error_px = 0;
     input.line_angle_d10 = 0;
     input.line_new = 1U;
-    for (now_ms = 610U; now_ms <= 650U; now_ms += 20U) {
+    for (now_ms = 630U; now_ms <= 670U; now_ms += 20U) {
         update_at(&maneuver, &input, &output, now_ms);
     }
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_CROSS);
@@ -104,12 +111,12 @@ static int test_left_turn_full_path(void)
     input.direction_mask = K230_LINE_DIRECTION_FRONT;
     input.left_position_cm += 16.5f;
     input.right_position_cm += 16.5f;
-    for (now_ms = 670U; now_ms <= 710U; now_ms += 20U) {
+    for (now_ms = 690U; now_ms <= 730U; now_ms += 20U) {
         update_at(&maneuver, &input, &output, now_ms);
     }
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_BRAKE_AFTER);
 
-    update_at(&maneuver, &input, &output, 1010U);
+    update_at(&maneuver, &input, &output, 1030U);
     CHECK(output.request_commit == 1U);
     DeliveryManeuver_ReportCommit(&maneuver, 1U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_IDLE);
@@ -133,6 +140,70 @@ static int test_right_turn_uses_mirrored_wheel_targets(void)
     CHECK(output.left_target_cm_s > 0.0f);
     CHECK(output.right_target_cm_s < 0.0f);
     CHECK(maneuver.target_heading_deg == -90.0f);
+    return 1;
+}
+
+static int test_yaw_zero_retries_and_imu_recovers(void)
+{
+    DeliveryManeuver maneuver;
+    DeliveryManeuver_Input input = default_input();
+    DeliveryManeuver_Output output;
+
+    CHECK(enter_turn_wait_zero(
+              &maneuver, &input, &output, ROUTE_DECISION_LEFT));
+
+    /* 一次清零失败只保留 WAIT_ZERO，不能让本次路口动作永久失败。 */
+    DeliveryManeuver_ReportYawZero(&maneuver, 0U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_TURN);
+    CHECK(maneuver.turn_phase == DELIVERY_MANEUVER_TURN_WAIT_ZERO);
+    CHECK(maneuver.fault == DELIVERY_MANEUVER_FAULT_NONE);
+
+    input.imu_fresh = 0U;
+    update_at(&maneuver, &input, &output, 510U);
+    CHECK(output.request_yaw_zero == 0U);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_STOP);
+
+    input.imu_fresh = 1U;
+    update_at(&maneuver, &input, &output, 530U);
+    CHECK(output.request_yaw_zero == 1U);
+    DeliveryManeuver_ReportYawZero(&maneuver, 1U);
+    CHECK(maneuver.turn_phase == DELIVERY_MANEUVER_TURN_ROTATE);
+
+    /* 已开始转向后 IMU 短时过期也只停车，恢复后继续输出转向轮速。 */
+    input.imu_fresh = 0U;
+    update_at(&maneuver, &input, &output, 550U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_TURN);
+    CHECK(maneuver.fault == DELIVERY_MANEUVER_FAULT_NONE);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_STOP);
+
+    input.imu_fresh = 1U;
+    input.heading_deg = 0.0f;
+    update_at(&maneuver, &input, &output, 570U);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_WHEEL_SPEED);
+    return 1;
+}
+
+static int test_speed_fault_requires_confirmation(void)
+{
+    DeliveryManeuver maneuver;
+    DeliveryManeuver_Input input = default_input();
+    DeliveryManeuver_Output output;
+    uint32_t now_ms;
+
+    CHECK(enter_turn_wait_zero(
+              &maneuver, &input, &output, ROUTE_DECISION_LEFT));
+    DeliveryManeuver_ReportYawZero(&maneuver, 1U);
+    input.heading_deg = 0.0f;
+    input.speed_faults = 1U;
+
+    /* 瞬时速度告警允许控制器自行恢复，连续十个周期才锁存故障。 */
+    for (now_ms = 510U; now_ms <= 670U; now_ms += 20U) {
+        update_at(&maneuver, &input, &output, now_ms);
+        CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_TURN);
+    }
+    update_at(&maneuver, &input, &output, 690U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_FAULT);
+    CHECK(maneuver.fault == DELIVERY_MANEUVER_FAULT_SPEED);
     return 1;
 }
 
@@ -293,6 +364,8 @@ static int test_reacquire_requires_new_frames(void)
     CHECK(enter_turn_wait_zero(
               &maneuver, &input, &output, ROUTE_DECISION_LEFT));
     DeliveryManeuver_ReportYawZero(&maneuver, 1U);
+    input.left_position_cm = 14.0f;
+    input.right_position_cm = 26.4f;
     input.heading_deg = 90.0f;
     update_at(&maneuver, &input, &output, 510U);
     update_at(&maneuver, &input, &output, 530U);
@@ -322,11 +395,16 @@ static int test_faults_stop_the_maneuver(void)
 
     CHECK(enter_turn_wait_zero(
               &maneuver, &input, &output, ROUTE_DECISION_LEFT));
+    DeliveryManeuver_ReportYawZero(&maneuver, 1U);
     input.imu_fresh = 0U;
     update_at(&maneuver, &input, &output, 510U);
-    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_FAULT);
-    CHECK(maneuver.fault == DELIVERY_MANEUVER_FAULT_IMU);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_TURN);
     CHECK(output.command == DELIVERY_MANEUVER_COMMAND_STOP);
+
+    /* IMU 长时间不恢复时仍由转向总超时进入安全故障。 */
+    update_at(&maneuver, &input, &output, 5500U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_FAULT);
+    CHECK(maneuver.fault == DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
 
     DeliveryManeuver_Reset(&maneuver);
     input = default_input();
@@ -362,6 +440,8 @@ int main(void)
 {
     if (!test_left_turn_full_path() ||
         !test_right_turn_uses_mirrored_wheel_targets() ||
+        !test_yaw_zero_retries_and_imu_recovers() ||
+        !test_speed_fault_requires_confirmation() ||
         !test_approach_uses_imu_when_line_disappears_in_junction() ||
         !test_approach_waits_for_link_and_resumes() ||
         !test_cross_waits_for_valid_line_and_resumes() ||

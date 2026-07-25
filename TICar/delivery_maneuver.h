@@ -94,9 +94,10 @@ typedef struct {
     uint8_t line_wait_active; /* 红线链路或有效线丢失后是否正在停车等待恢复。 */
     uint8_t line_recovery_count; /* 等待期间已连续收到的可恢复新 L 帧数量。 */
     uint32_t line_wait_start_ms; /* 本次停车等待红线恢复的开始时间，单位 ms。 */
-    uint8_t commit_requested;
-    uint8_t heading_stable_count;
-    int8_t reacquire_sweep_direction;
+    uint8_t commit_requested; /* 是否已经向路线任务发出当前动作提交请求。 */
+    uint8_t heading_stable_count; /* 航向连续进入目标误差范围的控制周期数。 */
+    uint8_t speed_fault_count; /* 底层速度故障连续出现的控制周期数。 */
+    int8_t reacquire_sweep_direction; /* 重捕获红线时当前原地扫描方向。 */
 } DeliveryManeuver;
 
 void DeliveryManeuver_Init(DeliveryManeuver *maneuver);

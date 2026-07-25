@@ -19,8 +19,10 @@
 #define MANEUVER_LINE_MAX_AGE_MS 400U /* 可用于动作控制的红线帧最大年龄，单位 ms。 */
 #define MANEUVER_LINE_RECOVERY_FRAMES 2U /* 丢线停车后恢复动作所需的连续新 L 帧数量。 */
 #define MANEUVER_TURN_SETTLE_MS 150U /* 开始 IMU 清零前的车体静止稳定时间，单位 ms。 */
-#define MANEUVER_TURN_TIMEOUT_MS 3000U /* IMU 转向阶段的最长允许时间，单位 ms。 */
+#define MANEUVER_TURN_TIMEOUT_MS 5000U /* IMU 转向阶段的最长允许时间，单位 ms。 */
+#define MANEUVER_TURN_MIN_WHEEL_CM 6.0f /* 接受 IMU 到角前要求的最小单轮位移，防止航向跳变导致小角度提前结束。 */
 #define MANEUVER_TURN_MAX_WHEEL_CM 12.0f /* IMU 转向阶段允许单轮累计行驶的最大距离，单位 cm。 */
+#define MANEUVER_SPEED_FAULT_CONFIRM_COUNT 10U /* 速度故障连续保持多少个控制周期后才锁存动作故障。 */
 #define MANEUVER_LEFT_TURN_TARGET_DEG 90.0f /* 左转时相对当前航向的目标角度，左转为正，单位 °。 */
 #define MANEUVER_RIGHT_TURN_TARGET_DEG -90.0f /* 右转时相对当前航向的目标角度，右转为负，单位 °。 */
 #define MANEUVER_TURN_COARSE_ERROR_DEG 20.0f /* 航向误差大于该值时使用粗转速度，单位 °。 */
@@ -136,6 +138,7 @@ static void Maneuver_EnterState(
     maneuver->line_recovery_count = 0U;
     maneuver->line_stable_count = 0U;
     maneuver->junction_clear_count = 0U;
+    maneuver->speed_fault_count = 0U;
 }
 
 static void Maneuver_SetFault(
@@ -299,6 +302,7 @@ uint8_t DeliveryManeuver_Start(
     maneuver->line_recovery_count = 0U;
     maneuver->line_stable_count = 0U;
     maneuver->junction_clear_count = 0U;
+    maneuver->speed_fault_count = 0U;
     maneuver->heading_stable_count = 0U;
     maneuver->reacquire_sweep_direction =
         (decision == ROUTE_DECISION_RIGHT) ? -1 : 1;
@@ -336,14 +340,26 @@ void DeliveryManeuver_Update(
     if (maneuver->state == DELIVERY_MANEUVER_STATE_FAULT) {
         return;
     }
-    if ((input->speed_faults != 0U) &&
-        ((maneuver->state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER) ||
-         ((maneuver->state == DELIVERY_MANEUVER_STATE_TURN) &&
-          (maneuver->turn_phase == DELIVERY_MANEUVER_TURN_ROTATE)) ||
-         (maneuver->state == DELIVERY_MANEUVER_STATE_REACQUIRE) ||
-         (maneuver->state == DELIVERY_MANEUVER_STATE_CROSS))) {
-        Maneuver_SetFault(maneuver, DELIVERY_MANEUVER_FAULT_SPEED);
-        return;
+    if ((maneuver->state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER) ||
+        ((maneuver->state == DELIVERY_MANEUVER_STATE_TURN) &&
+         (maneuver->turn_phase == DELIVERY_MANEUVER_TURN_ROTATE)) ||
+        (maneuver->state == DELIVERY_MANEUVER_STATE_REACQUIRE) ||
+        (maneuver->state == DELIVERY_MANEUVER_STATE_CROSS)) {
+        if (input->speed_faults != 0U) {
+            if (maneuver->speed_fault_count < 0xFFU) {
+                maneuver->speed_fault_count++;
+            }
+            if (maneuver->speed_fault_count >=
+                MANEUVER_SPEED_FAULT_CONFIRM_COUNT) {
+                Maneuver_SetFault(maneuver, DELIVERY_MANEUVER_FAULT_SPEED);
+                return;
+            }
+        } else {
+            /* 编码器反馈恢复后清除瞬时故障计数，避免单帧告警锁死转向。 */
+            maneuver->speed_fault_count = 0U;
+        }
+    } else {
+        maneuver->speed_fault_count = 0U;
     }
 
     center_distance = Maneuver_CenterDistance(maneuver, input);
@@ -444,11 +460,6 @@ void DeliveryManeuver_Update(
                         DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
                 break;
             }
-            if ((maneuver->turn_phase != DELIVERY_MANEUVER_TURN_SETTLE) &&
-                (input->imu_fresh == 0U)) {
-                Maneuver_SetFault(maneuver, DELIVERY_MANEUVER_FAULT_IMU);
-                break;
-            }
             if (maneuver->turn_phase == DELIVERY_MANEUVER_TURN_SETTLE) {
                 if (Maneuver_Elapsed(
                         input->now_ms,
@@ -459,13 +470,35 @@ void DeliveryManeuver_Update(
                 break;
             }
             if (maneuver->turn_phase == DELIVERY_MANEUVER_TURN_WAIT_ZERO) {
-                output->request_yaw_zero = 1U;
+                /* IMU 暂时未新鲜时保持停车，数据恢复后再尝试清零。 */
+                if (input->imu_fresh != 0U) {
+                    output->request_yaw_zero = 1U;
+                }
+                break;
+            }
+            if (input->imu_fresh == 0U) {
+                /* 转向中偶发丢失一帧 IMU 时先停车，不立即锁存永久故障。 */
+                maneuver->heading_stable_count = 0U;
                 break;
             }
 
             heading_error = Maneuver_NormalizeAngle(
                 maneuver->target_heading_deg - input->heading_deg);
             if (Maneuver_Abs(heading_error) <= MANEUVER_TURN_FINE_ERROR_DEG) {
+                if (wheel_distance < MANEUVER_TURN_MIN_WHEEL_CM) {
+                    /*
+                     * IMU 航向偶发跳到目标角时，编码器位移不足说明车体尚未真正转够。
+                     * 此时按原决策方向继续细转，禁止在约 10°处提前进入重捕获。
+                     */
+                    maneuver->heading_stable_count = 0U;
+                    turn_sign = (maneuver->decision == ROUTE_DECISION_LEFT) ?
+                                1.0f : -1.0f;
+                    Maneuver_SetOutputWheelSpeed(
+                        output,
+                        -turn_sign * MANEUVER_TURN_FINE_SPEED_CM_S,
+                        turn_sign * MANEUVER_TURN_FINE_SPEED_CM_S);
+                    break;
+                }
                 if (maneuver->heading_stable_count < 0xFFU) {
                     maneuver->heading_stable_count++;
                 }
@@ -613,7 +646,7 @@ void DeliveryManeuver_ReportYawZero(
         return;
     }
     if (success == 0U) {
-        Maneuver_SetFault(maneuver, DELIVERY_MANEUVER_FAULT_IMU);
+        /* IMU 可能正好处于一次数据更新间隙，保持 WAIT_ZERO 并在下一周期重试。 */
         return;
     }
     maneuver->turn_phase = DELIVERY_MANEUVER_TURN_ROTATE;
