@@ -12,12 +12,12 @@
 #define MANEUVER_BRAKE_MS 300U /* 路口动作开始和结束时的制动等待时间，单位 ms。 */
 #define MANEUVER_APPROACH_CENTER_CM 20.0f /* 识别路口后继续前进到旋转中心的距离，单位 cm。 */
 #define MANEUVER_APPROACH_MAX_CM 30.0f /* 进入路口中心阶段允许单轮行驶的最大距离，单位 cm。 */
-#define MANEUVER_APPROACH_TIMEOUT_MS 2500U /* 进入路口中心阶段的最长允许时间，单位 ms。 */
+#define MANEUVER_APPROACH_TIMEOUT_MS 5000U /* 进入路口中心阶段的最长实际运行时间，单位 ms；等待红线恢复的时间不计入。 */
 #define MANEUVER_APPROACH_BLIND_SPEED_CM_S 10.0f /* 路口内看不到红线时依靠编码器继续直行的基础轮速，单位 cm/s。 */
 #define MANEUVER_APPROACH_HEADING_KP 0.30f /* 丢线直行时 IMU 航向误差到轮速差修正的比例系数。 */
 #define MANEUVER_APPROACH_CORRECTION_LIMIT_CM_S 4.0f /* 丢线直行时单侧轮速修正的最大值，单位 cm/s。 */
-#define MANEUVER_LINE_BAD_GRACE_MS 200U /* 巡线阶段允许红线短暂无效的宽限时间，单位 ms。 */
 #define MANEUVER_LINE_MAX_AGE_MS 400U /* 可用于动作控制的红线帧最大年龄，单位 ms。 */
+#define MANEUVER_LINE_RECOVERY_FRAMES 2U /* 丢线停车后恢复动作所需的连续新 L 帧数量。 */
 #define MANEUVER_TURN_SETTLE_MS 150U /* 开始 IMU 清零前的车体静止稳定时间，单位 ms。 */
 #define MANEUVER_TURN_TIMEOUT_MS 3000U /* IMU 转向阶段的最长允许时间，单位 ms。 */
 #define MANEUVER_TURN_MAX_WHEEL_CM 12.0f /* IMU 转向阶段允许单轮累计行驶的最大距离，单位 cm。 */
@@ -132,7 +132,8 @@ static void Maneuver_EnterState(
     maneuver->state_start_ms = input->now_ms;
     maneuver->state_start_left_cm = input->left_position_cm;
     maneuver->state_start_right_cm = input->right_position_cm;
-    maneuver->line_bad_active = 0U;
+    maneuver->line_wait_active = 0U;
+    maneuver->line_recovery_count = 0U;
     maneuver->line_stable_count = 0U;
     maneuver->junction_clear_count = 0U;
 }
@@ -159,26 +160,45 @@ static uint8_t Maneuver_LineUsable(
             input->line_valid != 0U) ? 1U : 0U;
 }
 
-static uint8_t Maneuver_HandleLineLoss(
+/*
+ * 红线暂时不可用时保持当前动作状态并停车，连续收到可靠新帧后从原状态继续。
+ * 等待时间会补偿到 state_start_ms，避免通信恢复后立刻触发阶段超时。
+ */
+static uint8_t Maneuver_WaitForLineRecovery(
     DeliveryManeuver *maneuver,
-    const DeliveryManeuver_Input *input)
+    const DeliveryManeuver_Input *input,
+    uint8_t require_valid_line)
 {
-    if (Maneuver_LineUsable(input) != 0U) {
-        maneuver->line_bad_active = 0U;
+    uint8_t line_ready; /* 当前是否满足本阶段恢复条件：链路新鲜，必要时还要求红线有效。 */
+
+    line_ready = (require_valid_line != 0U) ?
+                 Maneuver_LineUsable(input) :
+                 Maneuver_LineTransportUsable(input);
+    if (line_ready == 0U) {
+        if (maneuver->line_wait_active == 0U) {
+            maneuver->line_wait_active = 1U;
+            maneuver->line_wait_start_ms = input->now_ms;
+        }
+        maneuver->line_recovery_count = 0U;
         return 1U;
     }
 
-    if (maneuver->line_bad_active == 0U) {
-        maneuver->line_bad_active = 1U;
-        maneuver->line_bad_start_ms = input->now_ms;
+    if (maneuver->line_wait_active == 0U) {
+        return 0U;
     }
-    if (Maneuver_LineTransportUsable(input) == 0U ||
-        Maneuver_Elapsed(
-            input->now_ms,
-            maneuver->line_bad_start_ms,
-            MANEUVER_LINE_BAD_GRACE_MS) != 0U) {
-        Maneuver_SetFault(maneuver, DELIVERY_MANEUVER_FAULT_LINE_TIMEOUT);
+    if (input->line_new != 0U) {
+        if (maneuver->line_recovery_count < MANEUVER_LINE_RECOVERY_FRAMES) {
+            maneuver->line_recovery_count++;
+        }
     }
+    if (maneuver->line_recovery_count < MANEUVER_LINE_RECOVERY_FRAMES) {
+        return 1U;
+    }
+
+    maneuver->state_start_ms +=
+        (uint32_t) (input->now_ms - maneuver->line_wait_start_ms);
+    maneuver->line_wait_active = 0U;
+    maneuver->line_recovery_count = 0U;
     return 0U;
 }
 
@@ -275,7 +295,8 @@ uint8_t DeliveryManeuver_Start(
     maneuver->turn_phase = DELIVERY_MANEUVER_TURN_SETTLE;
     maneuver->state = DELIVERY_MANEUVER_STATE_BRAKE;
     maneuver->commit_requested = 0U;
-    maneuver->line_bad_active = 0U;
+    maneuver->line_wait_active = 0U;
+    maneuver->line_recovery_count = 0U;
     maneuver->line_stable_count = 0U;
     maneuver->junction_clear_count = 0U;
     maneuver->heading_stable_count = 0U;
@@ -344,22 +365,10 @@ void DeliveryManeuver_Update(
             break;
 
         case DELIVERY_MANEUVER_STATE_APPROACH_CENTER:
-            if (Maneuver_Elapsed(
-                    input->now_ms,
-                    maneuver->state_start_ms,
-                    MANEUVER_APPROACH_TIMEOUT_MS) != 0U ||
-                wheel_distance > MANEUVER_APPROACH_MAX_CM) {
+            if (wheel_distance > MANEUVER_APPROACH_MAX_CM) {
                 Maneuver_SetFault(
                     maneuver,
-                    (wheel_distance > MANEUVER_APPROACH_MAX_CM) ?
-                        DELIVERY_MANEUVER_FAULT_ENCODER_LIMIT :
-                        DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
-                break;
-            }
-            if (Maneuver_LineTransportUsable(input) == 0U) {
-                Maneuver_SetFault(
-                    maneuver,
-                    DELIVERY_MANEUVER_FAULT_LINE_TIMEOUT);
+                    DELIVERY_MANEUVER_FAULT_ENCODER_LIMIT);
                 break;
             }
             if (center_distance >= MANEUVER_APPROACH_CENTER_CM) {
@@ -376,6 +385,18 @@ void DeliveryManeuver_Update(
                         DELIVERY_MANEUVER_STATE_CROSS,
                         input);
                 }
+                break;
+            }
+            if (Maneuver_WaitForLineRecovery(maneuver, input, 0U) != 0U) {
+                break;
+            }
+            if (Maneuver_Elapsed(
+                    input->now_ms,
+                    maneuver->state_start_ms,
+                    MANEUVER_APPROACH_TIMEOUT_MS) != 0U) {
+                Maneuver_SetFault(
+                    maneuver,
+                    DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
                 break;
             }
             if (Maneuver_LineUsable(input) != 0U) {
@@ -471,24 +492,26 @@ void DeliveryManeuver_Update(
             break;
 
         case DELIVERY_MANEUVER_STATE_REACQUIRE:
-            if (Maneuver_Elapsed(
-                    input->now_ms,
-                    maneuver->state_start_ms,
-                    MANEUVER_REACQUIRE_TIMEOUT_MS) != 0U ||
-                wheel_distance > MANEUVER_REACQUIRE_MAX_WHEEL_CM) {
+            if (wheel_distance > MANEUVER_REACQUIRE_MAX_WHEEL_CM) {
                 Maneuver_SetFault(
                     maneuver,
-                    (wheel_distance > MANEUVER_REACQUIRE_MAX_WHEEL_CM) ?
-                        DELIVERY_MANEUVER_FAULT_ENCODER_LIMIT :
-                        DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
+                    DELIVERY_MANEUVER_FAULT_ENCODER_LIMIT);
                 break;
             }
             if (input->imu_fresh == 0U) {
                 Maneuver_SetFault(maneuver, DELIVERY_MANEUVER_FAULT_IMU);
                 break;
             }
-            if (Maneuver_LineTransportUsable(input) == 0U) {
-                Maneuver_SetFault(maneuver, DELIVERY_MANEUVER_FAULT_LINE_TIMEOUT);
+            if (Maneuver_WaitForLineRecovery(maneuver, input, 0U) != 0U) {
+                break;
+            }
+            if (Maneuver_Elapsed(
+                    input->now_ms,
+                    maneuver->state_start_ms,
+                    MANEUVER_REACQUIRE_TIMEOUT_MS) != 0U) {
+                Maneuver_SetFault(
+                    maneuver,
+                    DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
                 break;
             }
             centered = (input->line_valid != 0U) &&
@@ -518,19 +541,22 @@ void DeliveryManeuver_Update(
             break;
 
         case DELIVERY_MANEUVER_STATE_CROSS:
+            if (center_distance > MANEUVER_CROSS_MAX_CM) {
+                Maneuver_SetFault(
+                    maneuver,
+                    DELIVERY_MANEUVER_FAULT_ENCODER_LIMIT);
+                break;
+            }
+            if (Maneuver_WaitForLineRecovery(maneuver, input, 1U) != 0U) {
+                break;
+            }
             if (Maneuver_Elapsed(
                     input->now_ms,
                     maneuver->state_start_ms,
-                    MANEUVER_CROSS_TIMEOUT_MS) != 0U ||
-                center_distance > MANEUVER_CROSS_MAX_CM) {
+                    MANEUVER_CROSS_TIMEOUT_MS) != 0U) {
                 Maneuver_SetFault(
                     maneuver,
-                    (center_distance > MANEUVER_CROSS_MAX_CM) ?
-                        DELIVERY_MANEUVER_FAULT_ENCODER_LIMIT :
-                        DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
-                break;
-            }
-            if (Maneuver_HandleLineLoss(maneuver, input) == 0U) {
+                    DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
                 break;
             }
             centered = (Maneuver_AbsInt16(input->line_error_px) <=

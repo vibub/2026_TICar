@@ -179,13 +179,20 @@ void DeliveryTask_Update(DeliveryTask *task, const DeliveryTask_Input *input)
         return;
     }
 
+    now_ms = Bsp_Time_GetMilliseconds();
     if (input->line_fresh == 0U) {
-        task->state = DELIVERY_STATE_FAULT;
-        task->pending_decision = ROUTE_DECISION_FAULT;
+        /*
+         * 红线链路中断时只停车等待，不把可恢复的通信抖动锁存成永久故障。
+         * DECIDE 的等待窗口同步暂停，避免恢复后立即按“未发现目标”直行。
+         */
+        task->line_waiting = 1U;
+        if (task->state == DELIVERY_STATE_DECIDE) {
+            task->decision_start_ms = now_ms;
+        }
         return;
     }
+    task->line_waiting = 0U;
 
-    now_ms = Bsp_Time_GetMilliseconds();
     new_junction = (input->junction_active != 0U) &&
                    (task->previous_junction_active == 0U);
     task->previous_junction_active = input->junction_active;
@@ -299,8 +306,9 @@ uint8_t DeliveryTask_IsMotionAllowed(const DeliveryTask *task)
     if (task == NULL) {
         return 0U;
     }
-    /* 路口进入 DECIDE 后先停车等待数字和方向决策，避免越过理想转向位置。 */
-    return (task->state == DELIVERY_STATE_FOLLOW) ? 1U : 0U;
+    /* 路口决策或红线链路恢复期间均保持停车，禁止沿用上一次电机输出。 */
+    return ((task->state == DELIVERY_STATE_FOLLOW) &&
+            (task->line_waiting == 0U)) ? 1U : 0U;
 }
 
 uint8_t DeliveryTask_HasPendingTurn(const DeliveryTask *task)

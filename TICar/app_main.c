@@ -1931,8 +1931,14 @@ static void App_DeliveryLineTask(void)
 
     App_UpdateDeliveryManeuverWatch(&output);
     if ((g_delivery_task.state == DELIVERY_STATE_IDLE) ||
-        (DeliveryTask_IsMotionAllowed(&g_delivery_task) != 0U)) {
-        if (App_K230ObservationReadyForFollow(&observation) != 0U) {
+        (g_delivery_task.state == DELIVERY_STATE_FOLLOW)) {
+        /*
+         * FOLLOW 丢失 L 帧时也必须经过统一恢复门控：先停车，再连续收到
+         * APP_K230_LINE_RECOVERY_FRAMES 帧有效红线后重置速度环并继续巡线。
+         */
+        if ((App_K230ObservationReadyForFollow(&observation) != 0U) &&
+            ((g_delivery_task.state == DELIVERY_STATE_IDLE) ||
+             (DeliveryTask_IsMotionAllowed(&g_delivery_task) != 0U))) {
             App_ApplyFollowObservation(
                 &g_k230_line_follow_profile,
                 1.0f,
@@ -1940,7 +1946,7 @@ static void App_DeliveryLineTask(void)
                 &observation);
         }
     } else {
-        /* IDENTIFY、TARGET_LOCKED、DECIDE 和 FAULT 均停车等待下一步事件。 */
+        /* IDENTIFY、TARGET_LOCKED、DECIDE、HOLD 和 FAULT 均停车等待下一步事件。 */
         App_LineStopForState(APP_LINE_CONTROL_WAIT_FRAME);
     }
     Bsp_Gpio_ToggleHeartbeat();

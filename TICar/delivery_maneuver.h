@@ -89,10 +89,11 @@ typedef struct {
     float target_heading_deg;
     float approach_heading_deg; /* 进入路口中心时保持的 IMU 直行航向，单位 °。 */
 
-    uint8_t line_stable_count;
-    uint8_t junction_clear_count;
-    uint8_t line_bad_active;
-    uint32_t line_bad_start_ms;
+    uint8_t line_stable_count; /* 红线连续满足当前阶段稳定条件的帧数。 */
+    uint8_t junction_clear_count; /* 穿越路口后连续确认已离开路口的帧数。 */
+    uint8_t line_wait_active; /* 红线链路或有效线丢失后是否正在停车等待恢复。 */
+    uint8_t line_recovery_count; /* 等待期间已连续收到的可恢复新 L 帧数量。 */
+    uint32_t line_wait_start_ms; /* 本次停车等待红线恢复的开始时间，单位 ms。 */
     uint8_t commit_requested;
     uint8_t heading_stable_count;
     int8_t reacquire_sweep_direction;

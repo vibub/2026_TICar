@@ -36,6 +36,7 @@ typedef struct {
     uint8_t route_region;
     uint8_t junction_id;
     uint8_t previous_junction_active;
+    uint8_t line_waiting; /* K230 红线链路中断后停车等待恢复，不锁存永久故障。 */
     /* 进入 DECIDE 时锁存当前路口方向，避免停车等待 YOLO 期间方向位被清除。 */
     uint8_t junction_direction_mask;
     uint8_t visual_mode;

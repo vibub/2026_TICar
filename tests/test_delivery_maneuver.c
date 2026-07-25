@@ -168,6 +168,86 @@ static int test_approach_uses_imu_when_line_disappears_in_junction(void)
     return 1;
 }
 
+static int test_approach_waits_for_link_and_resumes(void)
+{
+    DeliveryManeuver maneuver;
+    DeliveryManeuver_Input input = default_input();
+    DeliveryManeuver_Output output;
+
+    DeliveryManeuver_Init(&maneuver);
+    CHECK(DeliveryManeuver_Start(
+              &maneuver, ROUTE_DECISION_LEFT, &input) == 1U);
+    update_at(&maneuver, &input, &output, 300U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER);
+
+    /* L 帧链路中断时停车保留当前状态，等待时间不能触发阶段超时。 */
+    input.line_fresh = 0U;
+    input.line_new = 0U;
+    input.line_age_ms = 500U;
+    update_at(&maneuver, &input, &output, 320U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER);
+    CHECK(maneuver.fault == DELIVERY_MANEUVER_FAULT_NONE);
+    CHECK(maneuver.line_wait_active == 1U);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_STOP);
+
+    update_at(&maneuver, &input, &output, 6000U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER);
+    CHECK(maneuver.fault == DELIVERY_MANEUVER_FAULT_NONE);
+
+    /* 连续收到两帧新 L 帧后恢复原动作，并补偿停车等待时间。 */
+    input.line_fresh = 1U;
+    input.line_valid = 1U;
+    input.line_new = 1U;
+    input.line_age_ms = 0U;
+    update_at(&maneuver, &input, &output, 6020U);
+    CHECK(maneuver.line_wait_active == 1U);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_STOP);
+    update_at(&maneuver, &input, &output, 6040U);
+    CHECK(maneuver.line_wait_active == 0U);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_FOLLOW_LINE);
+
+    input.left_position_cm = 20.2f;
+    input.right_position_cm = 20.2f;
+    update_at(&maneuver, &input, &output, 6060U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_TURN);
+    return 1;
+}
+
+static int test_cross_waits_for_valid_line_and_resumes(void)
+{
+    DeliveryManeuver maneuver;
+    DeliveryManeuver_Input input = default_input();
+    DeliveryManeuver_Output output;
+
+    DeliveryManeuver_Init(&maneuver);
+    maneuver.state = DELIVERY_MANEUVER_STATE_CROSS;
+    maneuver.decision = ROUTE_DECISION_FRONT;
+    maneuver.state_start_ms = 0U;
+    maneuver.state_start_left_cm = 0.0f;
+    maneuver.state_start_right_cm = 0.0f;
+
+    /* L 帧仍到达但红线无效时停车，不能在 200 ms 后锁存故障。 */
+    input.line_valid = 0U;
+    update_at(&maneuver, &input, &output, 100U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_CROSS);
+    CHECK(maneuver.line_wait_active == 1U);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_STOP);
+    update_at(&maneuver, &input, &output, 4000U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_CROSS);
+    CHECK(maneuver.fault == DELIVERY_MANEUVER_FAULT_NONE);
+
+    /* 红线连续两帧恢复后，从 CROSS 原状态继续巡线。 */
+    input.line_valid = 1U;
+    input.line_new = 1U;
+    update_at(&maneuver, &input, &output, 4020U);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_STOP);
+    update_at(&maneuver, &input, &output, 4040U);
+    CHECK(maneuver.line_wait_active == 0U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_CROSS);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_FOLLOW_LINE);
+    return 1;
+}
+
 static int test_front_crosses_before_commit(void)
 {
     DeliveryManeuver maneuver;
@@ -253,11 +333,11 @@ static int test_faults_stop_the_maneuver(void)
     CHECK(DeliveryManeuver_Start(
               &maneuver, ROUTE_DECISION_FRONT, &input) == 1U);
     update_at(&maneuver, &input, &output, 300U);
-    input.line_fresh = 0U;
-    input.line_age_ms = 500U;
+    input.left_position_cm = 31.0f;
+    input.right_position_cm = 31.0f;
     update_at(&maneuver, &input, &output, 320U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_FAULT);
-    CHECK(maneuver.fault == DELIVERY_MANEUVER_FAULT_LINE_TIMEOUT);
+    CHECK(maneuver.fault == DELIVERY_MANEUVER_FAULT_ENCODER_LIMIT);
     return 1;
 }
 
@@ -283,6 +363,8 @@ int main(void)
     if (!test_left_turn_full_path() ||
         !test_right_turn_uses_mirrored_wheel_targets() ||
         !test_approach_uses_imu_when_line_disappears_in_junction() ||
+        !test_approach_waits_for_link_and_resumes() ||
+        !test_cross_waits_for_valid_line_and_resumes() ||
         !test_front_crosses_before_commit() ||
         !test_reacquire_requires_new_frames() ||
         !test_faults_stop_the_maneuver() ||

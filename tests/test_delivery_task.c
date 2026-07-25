@@ -365,7 +365,7 @@ static int test_decide_state_stops_until_digit_arrives(void)
     return 1;
 }
 
-static int test_line_timeout_enters_fault(void)
+static int test_line_timeout_waits_and_recovers(void)
 {
     DeliveryTask task;
     DeliveryTask_Input input = empty_input();
@@ -375,11 +375,22 @@ static int test_line_timeout_enters_fault(void)
     task.target_digit = 4U;
     task.target_locked = 1U;
     task.state = DELIVERY_STATE_FOLLOW;
+
+    /* L 帧链路中断只进入可恢复停车，不再锁存永久任务故障。 */
     input.line_fresh = 0U;
     DeliveryTask_Update(&task, &input);
-    CHECK(task.state == DELIVERY_STATE_FAULT);
-    CHECK(task.pending_decision == ROUTE_DECISION_FAULT);
+    CHECK(task.state == DELIVERY_STATE_FOLLOW);
+    CHECK(task.pending_decision == ROUTE_DECISION_NONE);
+    CHECK(task.line_waiting == 1U);
     CHECK(DeliveryTask_IsMotionAllowed(&task) == 0U);
+
+    /* 链路恢复后清除等待标志；应用层还会额外确认连续有效帧。 */
+    s_now_ms = 500U;
+    input.line_fresh = 1U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_FOLLOW);
+    CHECK(task.line_waiting == 0U);
+    CHECK(DeliveryTask_IsMotionAllowed(&task) == 1U);
     return 1;
 }
 
@@ -418,7 +429,7 @@ int main(void)
         !test_decide_retries_after_transient_direction_loss() ||
         !test_decide_preserves_junction_mask_while_waiting_yolo() ||
         !test_decide_state_stops_until_digit_arrives() ||
-        !test_line_timeout_enters_fault() ||
+        !test_line_timeout_waits_and_recovers() ||
         !test_visual_command_resends_until_ack()) {
         return 1;
     }
