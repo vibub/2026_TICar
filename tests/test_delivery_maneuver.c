@@ -50,8 +50,8 @@ static int enter_turn_wait_zero(
     update_at(maneuver, input, output, 300U);
     CHECK(maneuver->state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER);
 
-    input->left_position_cm = 8.2f;
-    input->right_position_cm = 8.2f;
+    input->left_position_cm = 20.2f;
+    input->right_position_cm = 20.2f;
     update_at(maneuver, input, output, 320U);
     CHECK(maneuver->state == DELIVERY_MANEUVER_STATE_TURN);
     CHECK(maneuver->turn_phase == DELIVERY_MANEUVER_TURN_SETTLE);
@@ -147,8 +147,8 @@ static int test_front_crosses_before_commit(void)
     CHECK(DeliveryManeuver_Start(
               &maneuver, ROUTE_DECISION_FRONT, &input) == 1U);
     update_at(&maneuver, &input, &output, 300U);
-    input.left_position_cm = 8.2f;
-    input.right_position_cm = 8.2f;
+    input.left_position_cm = 20.2f;
+    input.right_position_cm = 20.2f;
     update_at(&maneuver, &input, &output, 320U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_CROSS);
     CHECK(output.request_yaw_zero == 0U);

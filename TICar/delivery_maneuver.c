@@ -9,36 +9,38 @@
 
 #include <string.h>
 
-#define MANEUVER_BRAKE_MS 300U
-#define MANEUVER_APPROACH_CENTER_CM 8.0f
-#define MANEUVER_APPROACH_MAX_CM 16.0f
-#define MANEUVER_APPROACH_TIMEOUT_MS 2500U
-#define MANEUVER_LINE_BAD_GRACE_MS 200U
-#define MANEUVER_LINE_MAX_AGE_MS 400U
-#define MANEUVER_TURN_SETTLE_MS 150U
-#define MANEUVER_TURN_TIMEOUT_MS 3000U
-#define MANEUVER_TURN_MAX_WHEEL_CM 12.0f
-#define MANEUVER_TURN_COARSE_ERROR_DEG 20.0f
-#define MANEUVER_TURN_FINE_ERROR_DEG 4.0f
-#define MANEUVER_TURN_STABLE_COUNT 3U
-#define MANEUVER_TURN_COARSE_SPEED_CM_S 18.0f
-#define MANEUVER_TURN_FINE_SPEED_CM_S 10.0f
-#define MANEUVER_REACQUIRE_TIMEOUT_MS 1500U
-#define MANEUVER_REACQUIRE_MAX_WHEEL_CM 6.0f
-#define MANEUVER_REACQUIRE_SPEED_CM_S 8.0f
-#define MANEUVER_REACQUIRE_SWEEP_SPEED_CM_S 5.0f
-#define MANEUVER_REACQUIRE_SWEEP_ANGLE_DEG 10.0f
-#define MANEUVER_REACQUIRE_ERROR_PX 10
-#define MANEUVER_REACQUIRE_ANGLE_D10 60
-#define MANEUVER_REACQUIRE_STABLE_COUNT 3U
-#define MANEUVER_CROSS_MIN_CM 16.0f
-#define MANEUVER_CROSS_MAX_CM 35.0f
-#define MANEUVER_CROSS_TIMEOUT_MS 3500U
-#define MANEUVER_CROSS_STABLE_COUNT 3U
-#define MANEUVER_LINE_CENTER_ERROR_PX 14
-#define MANEUVER_LINE_CENTER_ANGLE_D10 100
-#define MANEUVER_FOLLOW_SCALE 0.80f
-#define MANEUVER_REACQUIRE_CORRECTION_LIMIT_CM_S 5.0f
+#define MANEUVER_BRAKE_MS 300U /* 路口动作开始和结束时的制动等待时间，单位 ms。 */
+#define MANEUVER_APPROACH_CENTER_CM 20.0f /* 识别路口后继续前进到旋转中心的距离，单位 cm。 */
+#define MANEUVER_APPROACH_MAX_CM 30.0f /* 进入路口中心阶段允许单轮行驶的最大距离，单位 cm。 */
+#define MANEUVER_APPROACH_TIMEOUT_MS 2500U /* 进入路口中心阶段的最长允许时间，单位 ms。 */
+#define MANEUVER_LINE_BAD_GRACE_MS 200U /* 巡线阶段允许红线短暂无效的宽限时间，单位 ms。 */
+#define MANEUVER_LINE_MAX_AGE_MS 400U /* 可用于动作控制的红线帧最大年龄，单位 ms。 */
+#define MANEUVER_TURN_SETTLE_MS 150U /* 开始 IMU 清零前的车体静止稳定时间，单位 ms。 */
+#define MANEUVER_TURN_TIMEOUT_MS 3000U /* IMU 转向阶段的最长允许时间，单位 ms。 */
+#define MANEUVER_TURN_MAX_WHEEL_CM 12.0f /* IMU 转向阶段允许单轮累计行驶的最大距离，单位 cm。 */
+#define MANEUVER_LEFT_TURN_TARGET_DEG 90.0f /* 左转时相对当前航向的目标角度，左转为正，单位 °。 */
+#define MANEUVER_RIGHT_TURN_TARGET_DEG -90.0f /* 右转时相对当前航向的目标角度，右转为负，单位 °。 */
+#define MANEUVER_TURN_COARSE_ERROR_DEG 20.0f /* 航向误差大于该值时使用粗转速度，单位 °。 */
+#define MANEUVER_TURN_FINE_ERROR_DEG 4.0f /* 航向误差进入该范围时认为到达目标角度，单位 °。 */
+#define MANEUVER_TURN_STABLE_COUNT 3U /* 航向连续满足目标误差范围所需的控制周期数。 */
+#define MANEUVER_TURN_COARSE_SPEED_CM_S 18.0f /* 航向误差较大时的原地转向轮速，单位 cm/s。 */
+#define MANEUVER_TURN_FINE_SPEED_CM_S 10.0f /* 接近目标航向时的精细转向轮速，单位 cm/s。 */
+#define MANEUVER_REACQUIRE_TIMEOUT_MS 1500U /* 转向后重新捕获红线的最长允许时间，单位 ms。 */
+#define MANEUVER_REACQUIRE_MAX_WHEEL_CM 6.0f /* 红线重捕获阶段允许单轮行驶的最大距离，单位 cm。 */
+#define MANEUVER_REACQUIRE_SPEED_CM_S 8.0f /* 已看到红线时向前对准红线的基础轮速，单位 cm/s。 */
+#define MANEUVER_REACQUIRE_SWEEP_SPEED_CM_S 5.0f /* 未看到红线时左右扫线的原地转向轮速，单位 cm/s。 */
+#define MANEUVER_REACQUIRE_SWEEP_ANGLE_DEG 10.0f /* 重捕获时在目标航向两侧的最大扫描角度，单位 °。 */
+#define MANEUVER_REACQUIRE_ERROR_PX 10 /* 判定红线重捕获成功的最大横向误差，单位 px。 */
+#define MANEUVER_REACQUIRE_ANGLE_D10 60 /* 判定红线重捕获成功的最大角度误差，单位 0.1°。 */
+#define MANEUVER_REACQUIRE_STABLE_COUNT 3U /* 红线连续满足重捕获条件所需的新帧数量。 */
+#define MANEUVER_CROSS_MIN_CM 16.0f /* 路口穿越阶段确认清除路口前的最小前进距离，单位 cm。 */
+#define MANEUVER_CROSS_MAX_CM 35.0f /* 路口穿越阶段允许前进的最大距离，单位 cm。 */
+#define MANEUVER_CROSS_TIMEOUT_MS 3500U /* 路口穿越阶段的最长允许时间，单位 ms。 */
+#define MANEUVER_CROSS_STABLE_COUNT 3U /* 路口清除条件连续成立所需的新红线帧数量。 */
+#define MANEUVER_LINE_CENTER_ERROR_PX 14 /* 穿越完成时红线允许的最大横向误差，单位 px。 */
+#define MANEUVER_LINE_CENTER_ANGLE_D10 100 /* 穿越完成时红线允许的最大角度误差，单位 0.1°。 */
+#define MANEUVER_FOLLOW_SCALE 0.80f /* 进入和穿越路口时相对正常巡线速度的缩放比例。 */
+#define MANEUVER_REACQUIRE_CORRECTION_LIMIT_CM_S 5.0f /* 重捕获红线时左右轮差速修正上限，单位 cm/s。 */
 
 static float Maneuver_Abs(float value)
 {
@@ -182,11 +184,11 @@ static void Maneuver_SetReacquireOutput(
     const DeliveryManeuver_Input *input,
     DeliveryManeuver_Output *output)
 {
-    float error;
-    float correction;
-    float desired_heading;
-    float heading_error;
-    float turn_sign;
+    float error; /* 当前红线横向误差，单位 px。 */
+    float correction; /* 根据红线误差计算的左右轮差速修正量，单位 cm/s。 */
+    float desired_heading; /* 扫线阶段当前希望到达的航向角，单位 °。 */
+    float heading_error; /* 目标扫线航向与当前 IMU 航向之间的误差，单位 °。 */
+    float turn_sign; /* 原地扫线方向，1 表示左转，-1 表示右转。 */
 
     if (input->line_valid != 0U) {
         error = (float) input->line_error_px;
@@ -264,7 +266,9 @@ uint8_t DeliveryManeuver_Start(
     maneuver->state_start_left_cm = input->left_position_cm;
     maneuver->state_start_right_cm = input->right_position_cm;
     maneuver->target_heading_deg =
-        (decision == ROUTE_DECISION_LEFT) ? 90.0f : -90.0f;
+        (decision == ROUTE_DECISION_LEFT) ?
+            MANEUVER_LEFT_TURN_TARGET_DEG :
+            MANEUVER_RIGHT_TURN_TARGET_DEG;
     maneuver->turn_phase = DELIVERY_MANEUVER_TURN_SETTLE;
     maneuver->state = DELIVERY_MANEUVER_STATE_BRAKE;
     maneuver->commit_requested = 0U;
@@ -282,12 +286,12 @@ void DeliveryManeuver_Update(
     const DeliveryManeuver_Input *input,
     DeliveryManeuver_Output *output)
 {
-    float center_distance;
-    float wheel_distance;
-    float heading_error;
-    float turn_sign;
-    float turn_speed;
-    uint8_t centered;
+    float center_distance; /* 当前状态内左右轮平均前进距离，单位 cm。 */
+    float wheel_distance; /* 当前状态内单轮累计位移绝对值的最大值，单位 cm。 */
+    float heading_error; /* IMU 目标航向与当前航向之间的归一化误差，单位 °。 */
+    float turn_sign; /* 原地转向方向，1 表示左转，-1 表示右转。 */
+    float turn_speed; /* 当前粗转或细转使用的轮速，单位 cm/s。 */
+    uint8_t centered; /* 红线横向和角度误差是否同时满足居中要求。 */
 
     if (output == NULL) {
         return;
@@ -392,7 +396,7 @@ void DeliveryManeuver_Update(
                         maneuver->state_start_ms,
                         MANEUVER_TURN_SETTLE_MS) != 0U) {
                     maneuver->turn_phase = DELIVERY_MANEUVER_TURN_WAIT_ZERO;
-                                }
+                }
                 break;
             }
             if (maneuver->turn_phase == DELIVERY_MANEUVER_TURN_WAIT_ZERO) {
