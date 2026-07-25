@@ -11,55 +11,33 @@
 
 #define MANEUVER_BRAKE_MS 300U /* 路口动作开始和结束时的制动等待时间，单位 ms。 */
 #define MANEUVER_APPROACH_CENTER_CM 20.0f /* 识别路口后继续前进到旋转中心的距离，单位 cm。 */
-#define MANEUVER_APPROACH_MAX_CM 30.0f /* 进入路口中心阶段允许单轮行驶的最大距离，单位 cm。 */
-#define MANEUVER_APPROACH_TIMEOUT_MS 5000U /* 进入路口中心阶段的最长实际运行时间，单位 ms；等待红线恢复的时间不计入。 */
-#define MANEUVER_APPROACH_BLIND_SPEED_CM_S 10.0f /* 路口内看不到红线时依靠编码器继续直行的基础轮速，单位 cm/s。 */
-#define MANEUVER_APPROACH_HEADING_KP 0.30f /* 丢线直行时 IMU 航向误差到轮速差修正的比例系数。 */
-#define MANEUVER_APPROACH_CORRECTION_LIMIT_CM_S 4.0f /* 丢线直行时单侧轮速修正的最大值，单位 cm/s。 */
-#define MANEUVER_LINE_MAX_AGE_MS 400U /* 可用于动作控制的红线帧最大年龄，单位 ms。 */
-#define MANEUVER_LINE_RECOVERY_FRAMES 2U /* 丢线停车后恢复动作所需的连续新 L 帧数量。 */
-#define MANEUVER_TURN_SETTLE_MS 150U /* 开始 IMU 清零前的车体静止稳定时间，单位 ms。 */
-#define MANEUVER_TURN_TIMEOUT_MS 5000U /* IMU 转向阶段的最长允许时间，单位 ms。 */
-#define MANEUVER_TURN_MIN_WHEEL_CM 6.0f /* 接受 IMU 到角前要求的最小单轮位移，防止航向跳变导致小角度提前结束。 */
-#define MANEUVER_TURN_MAX_WHEEL_CM 12.0f /* IMU 转向阶段允许单轮累计行驶的最大距离，单位 cm。 */
-#define MANEUVER_SPEED_FAULT_CONFIRM_COUNT 10U /* 速度故障连续保持多少个控制周期后才锁存动作故障。 */
-#define MANEUVER_LEFT_TURN_TARGET_DEG 90.0f /* 左转时相对当前航向的目标角度，左转为正，单位 °。 */
-#define MANEUVER_RIGHT_TURN_TARGET_DEG -90.0f /* 右转时相对当前航向的目标角度，右转为负，单位 °。 */
-#define MANEUVER_TURN_COARSE_ERROR_DEG 20.0f /* 航向误差大于该值时使用粗转速度，单位 °。 */
-#define MANEUVER_TURN_FINE_ERROR_DEG 4.0f /* 航向误差进入该范围时认为到达目标角度，单位 °。 */
-#define MANEUVER_TURN_STABLE_COUNT 3U /* 航向连续满足目标误差范围所需的控制周期数。 */
+#define MANEUVER_APPROACH_TIMEOUT_MS 6000U /* 进入路口中心阶段的最长允许时间，单位 ms。 */
+#define MANEUVER_APPROACH_BLIND_SPEED_CM_S 10.0f /* 路口内看不到红线时航向保持前进的基础轮速，单位 cm/s。 */
+#define MANEUVER_HEADING_HOLD_KP 0.30f /* 丢线前进时航向误差到轮速差修正的比例系数。 */
+#define MANEUVER_HEADING_HOLD_LIMIT_CM_S 4.0f /* 丢线前进时单侧轮速修正的最大值，单位 cm/s。 */
+#define MANEUVER_TURN_SETTLE_MS 150U /* 开始计算相对转向目标前的车体稳定时间，单位 ms。 */
+#define MANEUVER_TURN_TIMEOUT_MS 8000U /* 实际原地旋转阶段的最长允许时间，单位 ms。 */
+#define MANEUVER_TURN_MAX_TRAVEL_CM 30.0f /* 原地转向时双轮平均绝对位移的宽松安全上限，单位 cm。 */
+#define MANEUVER_LEFT_TURN_TARGET_DEG 90.0f /* 左转相对转角，左转为正，单位 °。 */
+#define MANEUVER_RIGHT_TURN_TARGET_DEG -90.0f /* 右转相对转角，右转为负，单位 °。 */
+#define MANEUVER_TURN_COARSE_ERROR_DEG 18.0f /* 航向误差大于该值时使用粗转速度，单位 °。 */
+#define MANEUVER_TURN_FINE_ERROR_DEG 6.0f /* 航向误差进入该范围时认为到达目标角度，单位 °。 */
+#define MANEUVER_TURN_STABLE_COUNT 2U /* 航向连续满足目标误差范围所需的控制周期数。 */
 #define MANEUVER_TURN_COARSE_SPEED_CM_S 18.0f /* 航向误差较大时的原地转向轮速，单位 cm/s。 */
-#define MANEUVER_TURN_FINE_SPEED_CM_S 10.0f /* 接近目标航向时的精细转向轮速，单位 cm/s。 */
-#define MANEUVER_REACQUIRE_TIMEOUT_MS 1500U /* 转向后重新捕获红线的最长允许时间，单位 ms。 */
-#define MANEUVER_REACQUIRE_MAX_WHEEL_CM 6.0f /* 红线重捕获阶段允许单轮行驶的最大距离，单位 cm。 */
-#define MANEUVER_REACQUIRE_SPEED_CM_S 8.0f /* 已看到红线时向前对准红线的基础轮速，单位 cm/s。 */
-#define MANEUVER_REACQUIRE_SWEEP_SPEED_CM_S 5.0f /* 未看到红线时左右扫线的原地转向轮速，单位 cm/s。 */
-#define MANEUVER_REACQUIRE_SWEEP_ANGLE_DEG 10.0f /* 重捕获时在目标航向两侧的最大扫描角度，单位 °。 */
-#define MANEUVER_REACQUIRE_ERROR_PX 10 /* 判定红线重捕获成功的最大横向误差，单位 px。 */
-#define MANEUVER_REACQUIRE_ANGLE_D10 60 /* 判定红线重捕获成功的最大角度误差，单位 0.1°。 */
-#define MANEUVER_REACQUIRE_STABLE_COUNT 3U /* 红线连续满足重捕获条件所需的新帧数量。 */
-#define MANEUVER_CROSS_MIN_CM 16.0f /* 路口穿越阶段确认清除路口前的最小前进距离，单位 cm。 */
-#define MANEUVER_CROSS_MAX_CM 35.0f /* 路口穿越阶段允许前进的最大距离，单位 cm。 */
-#define MANEUVER_CROSS_TIMEOUT_MS 3500U /* 路口穿越阶段的最长允许时间，单位 ms。 */
-#define MANEUVER_CROSS_STABLE_COUNT 3U /* 路口清除条件连续成立所需的新红线帧数量。 */
-#define MANEUVER_LINE_CENTER_ERROR_PX 14 /* 穿越完成时红线允许的最大横向误差，单位 px。 */
-#define MANEUVER_LINE_CENTER_ANGLE_D10 100 /* 穿越完成时红线允许的最大角度误差，单位 0.1°。 */
+#define MANEUVER_TURN_FINE_SPEED_CM_S 14.0f /* 接近目标航向时仍能克服静摩擦的细转轮速，单位 cm/s。 */
+#define MANEUVER_REACQUIRE_TIMEOUT_MS 2500U /* 转向后主动寻找红线的最长时间，单位 ms。 */
+#define MANEUVER_REACQUIRE_MAX_TRAVEL_CM 18.0f /* 重捕获阶段双轮平均绝对位移的继续流程门槛，单位 cm。 */
+#define MANEUVER_REACQUIRE_SWEEP_SPEED_CM_S 12.0f /* 未看到红线时原地扫描的轮速，单位 cm/s。 */
+#define MANEUVER_REACQUIRE_SWEEP_ANGLE_DEG 15.0f /* 重捕获时在目标航向两侧的扫描角度，单位 °。 */
+#define MANEUVER_CROSS_MIN_CM 12.0f /* 允许确认已经穿过路口的最小前进距离，单位 cm。 */
+#define MANEUVER_CROSS_FORCE_CM 24.0f /* 视觉持续抖动时强制完成本次路口动作的前进距离，单位 cm。 */
+#define MANEUVER_CROSS_TIMEOUT_MS 5000U /* 路口穿越阶段的最长允许时间，单位 ms。 */
+#define MANEUVER_CROSS_BLIND_SPEED_CM_S 8.0f /* 穿越阶段丢线时航向保持前进的轮速，单位 cm/s。 */
 #define MANEUVER_FOLLOW_SCALE 0.80f /* 进入和穿越路口时相对正常巡线速度的缩放比例。 */
-#define MANEUVER_REACQUIRE_CORRECTION_LIMIT_CM_S 5.0f /* 重捕获红线时左右轮差速修正上限，单位 cm/s。 */
 
 static float Maneuver_Abs(float value)
 {
     return (value < 0.0f) ? -value : value;
-}
-
-static float Maneuver_Max(float left, float right)
-{
-    return (left > right) ? left : right;
-}
-
-static int16_t Maneuver_AbsInt16(int16_t value)
-{
-    return (value < 0) ? (int16_t) (-value) : value;
 }
 
 static float Maneuver_NormalizeAngle(float angle)
@@ -89,13 +67,18 @@ static float Maneuver_CenterDistance(
             (input->right_position_cm - maneuver->state_start_right_cm)) * 0.5f;
 }
 
-static float Maneuver_MaxWheelDistance(
+/*
+ * 原地转向和扫线时左右轮方向相反，不能使用有符号中心距离。
+ * 取两轮绝对位移平均值可避免单轮空转或计数跳变直接代表整车转动进度。
+ */
+static float Maneuver_AverageWheelTravel(
     const DeliveryManeuver *maneuver,
     const DeliveryManeuver_Input *input)
 {
-    return Maneuver_Max(
-        Maneuver_Abs(input->left_position_cm - maneuver->state_start_left_cm),
-        Maneuver_Abs(input->right_position_cm - maneuver->state_start_right_cm));
+    return (Maneuver_Abs(
+                input->left_position_cm - maneuver->state_start_left_cm) +
+            Maneuver_Abs(
+                input->right_position_cm - maneuver->state_start_right_cm)) * 0.5f;
 }
 
 static void Maneuver_SetOutputStop(DeliveryManeuver_Output *output)
@@ -125,6 +108,31 @@ static void Maneuver_SetOutputWheelSpeed(
     output->right_target_cm_s = right_target_cm_s;
 }
 
+/* 红线不可用时，以较低速度保持指定航向向前，避免在路口中心永久停车。 */
+static void Maneuver_SetHeadingHoldForward(
+    float target_heading_deg,
+    float base_speed_cm_s,
+    const DeliveryManeuver_Input *input,
+    DeliveryManeuver_Output *output)
+{
+    float heading_error;
+    float correction;
+
+    heading_error = Maneuver_NormalizeAngle(
+        target_heading_deg - input->heading_deg);
+    correction = heading_error * MANEUVER_HEADING_HOLD_KP;
+    if (correction > MANEUVER_HEADING_HOLD_LIMIT_CM_S) {
+        correction = MANEUVER_HEADING_HOLD_LIMIT_CM_S;
+    } else if (correction < -MANEUVER_HEADING_HOLD_LIMIT_CM_S) {
+        correction = -MANEUVER_HEADING_HOLD_LIMIT_CM_S;
+    }
+
+    Maneuver_SetOutputWheelSpeed(
+        output,
+        base_speed_cm_s - correction,
+        base_speed_cm_s + correction);
+}
+
 static void Maneuver_EnterState(
     DeliveryManeuver *maneuver,
     DeliveryManeuver_State state,
@@ -134,11 +142,7 @@ static void Maneuver_EnterState(
     maneuver->state_start_ms = input->now_ms;
     maneuver->state_start_left_cm = input->left_position_cm;
     maneuver->state_start_right_cm = input->right_position_cm;
-    maneuver->line_wait_active = 0U;
-    maneuver->line_recovery_count = 0U;
-    maneuver->line_stable_count = 0U;
-    maneuver->junction_clear_count = 0U;
-    maneuver->speed_fault_count = 0U;
+    maneuver->heading_stable_count = 0U;
 }
 
 static void Maneuver_SetFault(
@@ -149,107 +153,40 @@ static void Maneuver_SetFault(
     maneuver->fault = fault;
 }
 
-static uint8_t Maneuver_LineTransportUsable(
-    const DeliveryManeuver_Input *input)
+static uint8_t Maneuver_LineUsable(const DeliveryManeuver_Input *input)
 {
     return ((input->line_fresh != 0U) &&
-            (input->line_age_ms <= MANEUVER_LINE_MAX_AGE_MS)) ? 1U : 0U;
+            (input->line_valid != 0U)) ? 1U : 0U;
 }
 
-static uint8_t Maneuver_LineUsable(
-    const DeliveryManeuver_Input *input)
-{
-    return (Maneuver_LineTransportUsable(input) != 0U &&
-            input->line_valid != 0U) ? 1U : 0U;
-}
-
-/*
- * 红线暂时不可用时保持当前动作状态并停车，连续收到可靠新帧后从原状态继续。
- * 等待时间会补偿到 state_start_ms，避免通信恢复后立刻触发阶段超时。
- */
-static uint8_t Maneuver_WaitForLineRecovery(
-    DeliveryManeuver *maneuver,
-    const DeliveryManeuver_Input *input,
-    uint8_t require_valid_line)
-{
-    uint8_t line_ready; /* 当前是否满足本阶段恢复条件：链路新鲜，必要时还要求红线有效。 */
-
-    line_ready = (require_valid_line != 0U) ?
-                 Maneuver_LineUsable(input) :
-                 Maneuver_LineTransportUsable(input);
-    if (line_ready == 0U) {
-        if (maneuver->line_wait_active == 0U) {
-            maneuver->line_wait_active = 1U;
-            maneuver->line_wait_start_ms = input->now_ms;
-        }
-        maneuver->line_recovery_count = 0U;
-        return 1U;
-    }
-
-    if (maneuver->line_wait_active == 0U) {
-        return 0U;
-    }
-    if (input->line_new != 0U) {
-        if (maneuver->line_recovery_count < MANEUVER_LINE_RECOVERY_FRAMES) {
-            maneuver->line_recovery_count++;
-        }
-    }
-    if (maneuver->line_recovery_count < MANEUVER_LINE_RECOVERY_FRAMES) {
-        return 1U;
-    }
-
-    maneuver->state_start_ms +=
-        (uint32_t) (input->now_ms - maneuver->line_wait_start_ms);
-    maneuver->line_wait_active = 0U;
-    maneuver->line_recovery_count = 0U;
-    return 0U;
-}
-
-static void Maneuver_SetReacquireOutput(
+/* 没有红线时在目标航向两侧往返扫描，扫描本身仍受时间和距离兜底约束。 */
+static void Maneuver_SetReacquireSweep(
     DeliveryManeuver *maneuver,
     const DeliveryManeuver_Input *input,
     DeliveryManeuver_Output *output)
 {
-    float error; /* 当前红线横向误差，单位 px。 */
-    float correction; /* 根据红线误差计算的左右轮差速修正量，单位 cm/s。 */
-    float desired_heading; /* 扫线阶段当前希望到达的航向角，单位 °。 */
-    float heading_error; /* 目标扫线航向与当前 IMU 航向之间的误差，单位 °。 */
-    float turn_sign; /* 原地扫线方向，1 表示左转，-1 表示右转。 */
+    float desired_heading;
+    float heading_error;
+    float turn_sign;
 
-    if (input->line_valid != 0U) {
-        error = (float) input->line_error_px;
-        correction = error * 0.12f;
-        if (Maneuver_Abs(error) < 5.0f) {
-            correction = ((float) input->line_angle_d10 / 10.0f) * 0.50f;
-        }
-        if (correction > MANEUVER_REACQUIRE_CORRECTION_LIMIT_CM_S) {
-            correction = MANEUVER_REACQUIRE_CORRECTION_LIMIT_CM_S;
-        } else if (correction < -MANEUVER_REACQUIRE_CORRECTION_LIMIT_CM_S) {
-            correction = -MANEUVER_REACQUIRE_CORRECTION_LIMIT_CM_S;
-        }
-        Maneuver_SetOutputWheelSpeed(
-            output,
-            MANEUVER_REACQUIRE_SPEED_CM_S + correction,
-            MANEUVER_REACQUIRE_SPEED_CM_S - correction);
-        return;
-    }
-
-    /* 没有红线时在目标航向两侧往返低速扫线，避免无边界地持续旋转。 */
-    desired_heading = maneuver->target_heading_deg +
+    desired_heading = Maneuver_NormalizeAngle(
+        maneuver->target_heading_deg +
         (float) maneuver->reacquire_sweep_direction *
-        MANEUVER_REACQUIRE_SWEEP_ANGLE_DEG;
+        MANEUVER_REACQUIRE_SWEEP_ANGLE_DEG);
     heading_error = Maneuver_NormalizeAngle(
         desired_heading - input->heading_deg);
     if (Maneuver_Abs(heading_error) <= 2.0f) {
         maneuver->reacquire_sweep_direction =
             (int8_t) (-maneuver->reacquire_sweep_direction);
-        desired_heading = maneuver->target_heading_deg +
+        desired_heading = Maneuver_NormalizeAngle(
+            maneuver->target_heading_deg +
             (float) maneuver->reacquire_sweep_direction *
-            MANEUVER_REACQUIRE_SWEEP_ANGLE_DEG;
+            MANEUVER_REACQUIRE_SWEEP_ANGLE_DEG);
         heading_error = Maneuver_NormalizeAngle(
             desired_heading - input->heading_deg);
     }
-    turn_sign = (heading_error > 0.0f) ? 1.0f : -1.0f;
+
+    turn_sign = (heading_error >= 0.0f) ? 1.0f : -1.0f;
     Maneuver_SetOutputWheelSpeed(
         output,
         -turn_sign * MANEUVER_REACQUIRE_SWEEP_SPEED_CM_S,
@@ -288,21 +225,13 @@ uint8_t DeliveryManeuver_Start(
     maneuver->decision = decision;
     maneuver->fault = DELIVERY_MANEUVER_FAULT_NONE;
     maneuver->state_start_ms = input->now_ms;
-    maneuver->last_now_ms = input->now_ms;
     maneuver->state_start_left_cm = input->left_position_cm;
     maneuver->state_start_right_cm = input->right_position_cm;
-    maneuver->target_heading_deg =
-        (decision == ROUTE_DECISION_LEFT) ?
-            MANEUVER_LEFT_TURN_TARGET_DEG :
-            MANEUVER_RIGHT_TURN_TARGET_DEG;
+    maneuver->target_heading_deg = input->heading_deg;
+    maneuver->approach_heading_deg = input->heading_deg;
     maneuver->turn_phase = DELIVERY_MANEUVER_TURN_SETTLE;
     maneuver->state = DELIVERY_MANEUVER_STATE_BRAKE;
     maneuver->commit_requested = 0U;
-    maneuver->line_wait_active = 0U;
-    maneuver->line_recovery_count = 0U;
-    maneuver->line_stable_count = 0U;
-    maneuver->junction_clear_count = 0U;
-    maneuver->speed_fault_count = 0U;
     maneuver->heading_stable_count = 0U;
     maneuver->reacquire_sweep_direction =
         (decision == ROUTE_DECISION_RIGHT) ? -1 : 1;
@@ -315,55 +244,28 @@ void DeliveryManeuver_Update(
     DeliveryManeuver_Output *output)
 {
     float center_distance; /* 当前状态内左右轮平均前进距离，单位 cm。 */
-    float wheel_distance; /* 当前状态内单轮累计位移绝对值的最大值，单位 cm。 */
+    float wheel_travel; /* 当前状态内双轮绝对位移平均值，单位 cm。 */
     float heading_error; /* IMU 目标航向与当前航向之间的归一化误差，单位 °。 */
     float turn_sign; /* 原地转向方向，1 表示左转，-1 表示右转。 */
     float turn_speed; /* 当前粗转或细转使用的轮速，单位 cm/s。 */
-    float approach_correction; /* 进入路口中心丢线后使用的 IMU 差速修正量，单位 cm/s。 */
-    uint8_t centered; /* 红线横向和角度误差是否同时满足居中要求。 */
+    float relative_turn; /* 本次路线决策对应的相对转角，单位 °。 */
 
     if (output == NULL) {
         return;
     }
     Maneuver_SetOutputStop(output);
-    output->request_yaw_zero = 0U;
     output->request_commit = 0U;
 
     if ((maneuver == NULL) || (input == NULL)) {
         return;
     }
-    maneuver->last_now_ms = input->now_ms;
-
-    if (maneuver->state == DELIVERY_MANEUVER_STATE_IDLE) {
+    if ((maneuver->state == DELIVERY_MANEUVER_STATE_IDLE) ||
+        (maneuver->state == DELIVERY_MANEUVER_STATE_FAULT)) {
         return;
-    }
-    if (maneuver->state == DELIVERY_MANEUVER_STATE_FAULT) {
-        return;
-    }
-    if ((maneuver->state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER) ||
-        ((maneuver->state == DELIVERY_MANEUVER_STATE_TURN) &&
-         (maneuver->turn_phase == DELIVERY_MANEUVER_TURN_ROTATE)) ||
-        (maneuver->state == DELIVERY_MANEUVER_STATE_REACQUIRE) ||
-        (maneuver->state == DELIVERY_MANEUVER_STATE_CROSS)) {
-        if (input->speed_faults != 0U) {
-            if (maneuver->speed_fault_count < 0xFFU) {
-                maneuver->speed_fault_count++;
-            }
-            if (maneuver->speed_fault_count >=
-                MANEUVER_SPEED_FAULT_CONFIRM_COUNT) {
-                Maneuver_SetFault(maneuver, DELIVERY_MANEUVER_FAULT_SPEED);
-                return;
-            }
-        } else {
-            /* 编码器反馈恢复后清除瞬时故障计数，避免单帧告警锁死转向。 */
-            maneuver->speed_fault_count = 0U;
-        }
-    } else {
-        maneuver->speed_fault_count = 0U;
     }
 
     center_distance = Maneuver_CenterDistance(maneuver, input);
-    wheel_distance = Maneuver_MaxWheelDistance(maneuver, input);
+    wheel_travel = Maneuver_AverageWheelTravel(maneuver, input);
 
     switch (maneuver->state) {
         case DELIVERY_MANEUVER_STATE_BRAKE:
@@ -371,8 +273,10 @@ void DeliveryManeuver_Update(
                     input->now_ms,
                     maneuver->state_start_ms,
                     MANEUVER_BRAKE_MS) != 0U) {
-                /* 路口内主线可能被横线遮断，提前保存当前航向供丢线后直行。 */
-                maneuver->approach_heading_deg = input->heading_deg;
+                /* 只在航向新鲜时更新基准，避免把过期读数覆盖掉已有航向。 */
+                if (input->imu_fresh != 0U) {
+                    maneuver->approach_heading_deg = input->heading_deg;
+                }
                 Maneuver_EnterState(
                     maneuver,
                     DELIVERY_MANEUVER_STATE_APPROACH_CENTER,
@@ -381,12 +285,6 @@ void DeliveryManeuver_Update(
             break;
 
         case DELIVERY_MANEUVER_STATE_APPROACH_CENTER:
-            if (wheel_distance > MANEUVER_APPROACH_MAX_CM) {
-                Maneuver_SetFault(
-                    maneuver,
-                    DELIVERY_MANEUVER_FAULT_ENCODER_LIMIT);
-                break;
-            }
             if (center_distance >= MANEUVER_APPROACH_CENTER_CM) {
                 if ((maneuver->decision == ROUTE_DECISION_LEFT) ||
                     (maneuver->decision == ROUTE_DECISION_RIGHT)) {
@@ -396,14 +294,13 @@ void DeliveryManeuver_Update(
                         DELIVERY_MANEUVER_STATE_TURN,
                         input);
                 } else {
+                    maneuver->target_heading_deg =
+                        maneuver->approach_heading_deg;
                     Maneuver_EnterState(
                         maneuver,
                         DELIVERY_MANEUVER_STATE_CROSS,
                         input);
                 }
-                break;
-            }
-            if (Maneuver_WaitForLineRecovery(maneuver, input, 0U) != 0U) {
                 break;
             }
             if (Maneuver_Elapsed(
@@ -417,67 +314,55 @@ void DeliveryManeuver_Update(
             }
             if (Maneuver_LineUsable(input) != 0U) {
                 Maneuver_SetOutputFollow(output);
-                break;
+            } else if (input->imu_fresh != 0U) {
+                Maneuver_SetHeadingHoldForward(
+                    maneuver->approach_heading_deg,
+                    MANEUVER_APPROACH_BLIND_SPEED_CM_S,
+                    input,
+                    output);
             }
-
-            /*
-             * 十字或 T 字路口中心的纵向红线可能暂时不可见。此时不再因 valid=0
-             * 停车，而是用进入路口前保存的 IMU 航向和编码器距离继续驶向旋转中心。
-             */
-            if (input->imu_fresh == 0U) {
-                Maneuver_SetFault(maneuver, DELIVERY_MANEUVER_FAULT_IMU);
-                break;
-            }
-            heading_error = Maneuver_NormalizeAngle(
-                maneuver->approach_heading_deg - input->heading_deg);
-            approach_correction =
-                heading_error * MANEUVER_APPROACH_HEADING_KP;
-            if (approach_correction >
-                MANEUVER_APPROACH_CORRECTION_LIMIT_CM_S) {
-                approach_correction =
-                    MANEUVER_APPROACH_CORRECTION_LIMIT_CM_S;
-            } else if (approach_correction <
-                       -MANEUVER_APPROACH_CORRECTION_LIMIT_CM_S) {
-                approach_correction =
-                    -MANEUVER_APPROACH_CORRECTION_LIMIT_CM_S;
-            }
-            Maneuver_SetOutputWheelSpeed(
-                output,
-                MANEUVER_APPROACH_BLIND_SPEED_CM_S - approach_correction,
-                MANEUVER_APPROACH_BLIND_SPEED_CM_S + approach_correction);
             break;
 
         case DELIVERY_MANEUVER_STATE_TURN:
-            if (Maneuver_Elapsed(
-                    input->now_ms,
-                    maneuver->state_start_ms,
-                    MANEUVER_TURN_TIMEOUT_MS) != 0U ||
-                wheel_distance > MANEUVER_TURN_MAX_WHEEL_CM) {
+            if (maneuver->turn_phase == DELIVERY_MANEUVER_TURN_SETTLE) {
+                if ((Maneuver_Elapsed(
+                         input->now_ms,
+                         maneuver->state_start_ms,
+                         MANEUVER_TURN_SETTLE_MS) != 0U) &&
+                    (input->imu_fresh != 0U)) {
+                    relative_turn =
+                        (maneuver->decision == ROUTE_DECISION_LEFT) ?
+                            MANEUVER_LEFT_TURN_TARGET_DEG :
+                            MANEUVER_RIGHT_TURN_TARGET_DEG;
+                    maneuver->target_heading_deg = Maneuver_NormalizeAngle(
+                        input->heading_deg + relative_turn);
+                    maneuver->turn_phase = DELIVERY_MANEUVER_TURN_ROTATE;
+                    maneuver->state_start_ms = input->now_ms;
+                    maneuver->state_start_left_cm = input->left_position_cm;
+                    maneuver->state_start_right_cm = input->right_position_cm;
+                    maneuver->heading_stable_count = 0U;
+                }
+                break;
+            }
+            if (maneuver->turn_phase != DELIVERY_MANEUVER_TURN_ROTATE) {
                 Maneuver_SetFault(
                     maneuver,
-                    (wheel_distance > MANEUVER_TURN_MAX_WHEEL_CM) ?
+                    DELIVERY_MANEUVER_FAULT_INVALID_START);
+                break;
+            }
+            if ((wheel_travel > MANEUVER_TURN_MAX_TRAVEL_CM) ||
+                (Maneuver_Elapsed(
+                     input->now_ms,
+                     maneuver->state_start_ms,
+                     MANEUVER_TURN_TIMEOUT_MS) != 0U)) {
+                Maneuver_SetFault(
+                    maneuver,
+                    (wheel_travel > MANEUVER_TURN_MAX_TRAVEL_CM) ?
                         DELIVERY_MANEUVER_FAULT_ENCODER_LIMIT :
                         DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
                 break;
             }
-            if (maneuver->turn_phase == DELIVERY_MANEUVER_TURN_SETTLE) {
-                if (Maneuver_Elapsed(
-                        input->now_ms,
-                        maneuver->state_start_ms,
-                        MANEUVER_TURN_SETTLE_MS) != 0U) {
-                    maneuver->turn_phase = DELIVERY_MANEUVER_TURN_WAIT_ZERO;
-                }
-                break;
-            }
-            if (maneuver->turn_phase == DELIVERY_MANEUVER_TURN_WAIT_ZERO) {
-                /* IMU 暂时未新鲜时保持停车，数据恢复后再尝试清零。 */
-                if (input->imu_fresh != 0U) {
-                    output->request_yaw_zero = 1U;
-                }
-                break;
-            }
             if (input->imu_fresh == 0U) {
-                /* 转向中偶发丢失一帧 IMU 时先停车，不立即锁存永久故障。 */
                 maneuver->heading_stable_count = 0U;
                 break;
             }
@@ -485,32 +370,19 @@ void DeliveryManeuver_Update(
             heading_error = Maneuver_NormalizeAngle(
                 maneuver->target_heading_deg - input->heading_deg);
             if (Maneuver_Abs(heading_error) <= MANEUVER_TURN_FINE_ERROR_DEG) {
-                if (wheel_distance < MANEUVER_TURN_MIN_WHEEL_CM) {
-                    /*
-                     * IMU 航向偶发跳到目标角时，编码器位移不足说明车体尚未真正转够。
-                     * 此时按原决策方向继续细转，禁止在约 10°处提前进入重捕获。
-                     */
-                    maneuver->heading_stable_count = 0U;
-                    turn_sign = (maneuver->decision == ROUTE_DECISION_LEFT) ?
-                                1.0f : -1.0f;
-                    Maneuver_SetOutputWheelSpeed(
-                        output,
-                        -turn_sign * MANEUVER_TURN_FINE_SPEED_CM_S,
-                        turn_sign * MANEUVER_TURN_FINE_SPEED_CM_S);
-                    break;
-                }
                 if (maneuver->heading_stable_count < 0xFFU) {
                     maneuver->heading_stable_count++;
                 }
-                if (maneuver->heading_stable_count >= MANEUVER_TURN_STABLE_COUNT) {
+                if (maneuver->heading_stable_count >=
+                    MANEUVER_TURN_STABLE_COUNT) {
                     Maneuver_EnterState(
                         maneuver,
                         DELIVERY_MANEUVER_STATE_REACQUIRE,
                         input);
-                    break;
                 }
                 break;
             }
+
             maneuver->heading_stable_count = 0U;
             turn_sign = (heading_error > 0.0f) ? 1.0f : -1.0f;
             turn_speed = (Maneuver_Abs(heading_error) >
@@ -525,97 +397,77 @@ void DeliveryManeuver_Update(
             break;
 
         case DELIVERY_MANEUVER_STATE_REACQUIRE:
-            if (wheel_distance > MANEUVER_REACQUIRE_MAX_WHEEL_CM) {
-                Maneuver_SetFault(
-                    maneuver,
-                    DELIVERY_MANEUVER_FAULT_ENCODER_LIMIT);
-                break;
-            }
-            if (input->imu_fresh == 0U) {
-                Maneuver_SetFault(maneuver, DELIVERY_MANEUVER_FAULT_IMU);
-                break;
-            }
-            if (Maneuver_WaitForLineRecovery(maneuver, input, 0U) != 0U) {
-                break;
-            }
-            if (Maneuver_Elapsed(
-                    input->now_ms,
-                    maneuver->state_start_ms,
-                    MANEUVER_REACQUIRE_TIMEOUT_MS) != 0U) {
-                Maneuver_SetFault(
-                    maneuver,
-                    DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
-                break;
-            }
-            centered = (input->line_valid != 0U) &&
-                       (Maneuver_AbsInt16(input->line_error_px) <=
-                        MANEUVER_REACQUIRE_ERROR_PX) &&
-                       (Maneuver_AbsInt16(input->line_angle_d10) <=
-                        MANEUVER_REACQUIRE_ANGLE_D10) ? 1U : 0U;
             if ((input->line_new != 0U) &&
-                (input->line_valid != 0U) &&
-                (input->line_quality >= K230_LINE_MIN_QUALITY) &&
-                (centered != 0U)) {
-                if (maneuver->line_stable_count < 0xFFU) {
-                    maneuver->line_stable_count++;
-                }
-                if (maneuver->line_stable_count >=
-                    MANEUVER_REACQUIRE_STABLE_COUNT) {
-                    Maneuver_EnterState(
-                        maneuver,
-                        DELIVERY_MANEUVER_STATE_CROSS,
-                        input);
-                    break;
-                }
-            } else if (input->line_new != 0U) {
-                maneuver->line_stable_count = 0U;
+                (Maneuver_LineUsable(input) != 0U)) {
+                Maneuver_EnterState(
+                    maneuver,
+                    DELIVERY_MANEUVER_STATE_CROSS,
+                    input);
+                break;
             }
-            Maneuver_SetReacquireOutput(maneuver, input, output);
+            if ((wheel_travel >= MANEUVER_REACQUIRE_MAX_TRAVEL_CM) ||
+                (Maneuver_Elapsed(
+                     input->now_ms,
+                     maneuver->state_start_ms,
+                     MANEUVER_REACQUIRE_TIMEOUT_MS) != 0U)) {
+                /* 找线失败也继续穿越，由 CROSS 的航向保持和距离兜底完成流程。 */
+                Maneuver_EnterState(
+                    maneuver,
+                    DELIVERY_MANEUVER_STATE_CROSS,
+                    input);
+                break;
+            }
+            if (Maneuver_LineUsable(input) != 0U) {
+                Maneuver_SetOutputFollow(output);
+            } else if (input->imu_fresh != 0U) {
+                Maneuver_SetReacquireSweep(maneuver, input, output);
+            }
             break;
 
         case DELIVERY_MANEUVER_STATE_CROSS:
-            if (center_distance > MANEUVER_CROSS_MAX_CM) {
-                Maneuver_SetFault(
+            if (center_distance >= MANEUVER_CROSS_FORCE_CM) {
+                Maneuver_EnterState(
                     maneuver,
-                    DELIVERY_MANEUVER_FAULT_ENCODER_LIMIT);
+                    DELIVERY_MANEUVER_STATE_BRAKE_AFTER,
+                    input);
                 break;
             }
-            if (Maneuver_WaitForLineRecovery(maneuver, input, 1U) != 0U) {
+            if ((center_distance >= MANEUVER_CROSS_MIN_CM) &&
+                (input->line_new != 0U) &&
+                (Maneuver_LineUsable(input) != 0U) &&
+                ((input->direction_mask & K230_LINE_DIRECTION_FRONT) != 0U) &&
+                (input->junction_active == 0U)) {
+                Maneuver_EnterState(
+                    maneuver,
+                    DELIVERY_MANEUVER_STATE_BRAKE_AFTER,
+                    input);
                 break;
             }
             if (Maneuver_Elapsed(
                     input->now_ms,
                     maneuver->state_start_ms,
                     MANEUVER_CROSS_TIMEOUT_MS) != 0U) {
-                Maneuver_SetFault(
-                    maneuver,
-                    DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
-                break;
-            }
-            centered = (Maneuver_AbsInt16(input->line_error_px) <=
-                        MANEUVER_LINE_CENTER_ERROR_PX) &&
-                       (Maneuver_AbsInt16(input->line_angle_d10) <=
-                        MANEUVER_LINE_CENTER_ANGLE_D10) ? 1U : 0U;
-            if ((center_distance >= MANEUVER_CROSS_MIN_CM) &&
-                (input->line_new != 0U) &&
-                (input->direction_mask == K230_LINE_DIRECTION_FRONT) &&
-                (input->junction_active == 0U) &&
-                (centered != 0U)) {
-                if (maneuver->junction_clear_count < 0xFFU) {
-                    maneuver->junction_clear_count++;
-                }
-                if (maneuver->junction_clear_count >=
-                    MANEUVER_CROSS_STABLE_COUNT) {
+                if (center_distance >= MANEUVER_CROSS_MIN_CM) {
                     Maneuver_EnterState(
                         maneuver,
                         DELIVERY_MANEUVER_STATE_BRAKE_AFTER,
                         input);
-                    break;
+                } else {
+                    Maneuver_SetFault(
+                        maneuver,
+                        DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
                 }
-            } else if (input->line_new != 0U) {
-                maneuver->junction_clear_count = 0U;
+                break;
             }
-            Maneuver_SetOutputFollow(output);
+            if (Maneuver_LineUsable(input) != 0U) {
+                Maneuver_SetOutputFollow(output);
+            } else if (input->imu_fresh != 0U) {
+                Maneuver_SetHeadingHoldForward(
+                    maneuver->target_heading_deg,
+                    MANEUVER_CROSS_BLIND_SPEED_CM_S,
+                    input,
+                    output);
+            }
             break;
 
         case DELIVERY_MANEUVER_STATE_BRAKE_AFTER:
@@ -634,24 +486,6 @@ void DeliveryManeuver_Update(
                 DELIVERY_MANEUVER_FAULT_INVALID_START);
             break;
     }
-}
-
-void DeliveryManeuver_ReportYawZero(
-    DeliveryManeuver *maneuver,
-    uint8_t success)
-{
-    if ((maneuver == NULL) ||
-        (maneuver->state != DELIVERY_MANEUVER_STATE_TURN) ||
-        (maneuver->turn_phase != DELIVERY_MANEUVER_TURN_WAIT_ZERO)) {
-        return;
-    }
-    if (success == 0U) {
-        /* IMU 可能正好处于一次数据更新间隙，保持 WAIT_ZERO 并在下一周期重试。 */
-        return;
-    }
-    maneuver->turn_phase = DELIVERY_MANEUVER_TURN_ROTATE;
-    maneuver->heading_stable_count = 0U;
-    maneuver->state_start_ms = maneuver->last_now_ms;
 }
 
 void DeliveryManeuver_ReportCommit(

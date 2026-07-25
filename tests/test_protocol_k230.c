@@ -176,23 +176,24 @@ static int test_independent_timeouts(void)
     s_now_ms = 10U;
     feed_text("L,1,0,0,90,2\n");
 
-    s_now_ms = 100U;
+    /* 靠近红线 800 ms 超时边界时刷新靶标链路，验证两类超时互不影响。 */
+    s_now_ms = 700U;
     feed_text("N\n");
     CHECK(g_k230_line_alive == 1U);
     CHECK(g_k230_link_alive == 1U);
 
-    s_now_ms = 209U;
+    s_now_ms = 809U;
     Protocol_K230_Task();
     CHECK(g_k230_line_alive == 1U);
 
-    s_now_ms = 210U;
+    s_now_ms = 810U;
     Protocol_K230_Task();
     CHECK(g_k230_line_alive == 0U);
     CHECK(g_k230_line_control_valid == 0U);
     CHECK(g_k230_line_timeout_count == 1U);
     CHECK(g_k230_link_alive == 1U);
 
-    s_now_ms = 400U;
+    s_now_ms = 1000U;
     Protocol_K230_Task();
     CHECK(g_k230_link_alive == 0U);
     CHECK(g_k230_timeout_count == 1U);

@@ -92,6 +92,7 @@
 #define APP_IMU_HEADING_CORRECTION_LIMIT 0.08f
 #define APP_IMU_HEADING_CORRECTION_SLEW 0.02f
 #define APP_IMU_HEADING_MAX_AGE_MS 100U
+#define APP_DELIVERY_IMU_HEADING_MAX_AGE_MS 250U /* 送药路口允许更长的 SFLP 更新间隔，避免瞬时丢帧打断转向。 */
 
 /* 普通/圆形巡线允许短时沿最后一次有效方向低速搜索，超过窗口后主动停车。 */
 #define APP_LINE_LOST_RECOVER_MAX 8U // 普通和圆形巡线丢线后继续搜索的最大 20 ms 周期数。
@@ -1804,15 +1805,14 @@ static void App_FillDeliveryManeuverInput(
     input->line_fresh = observation->fresh;
     input->line_new = observation->new_frame;
     input->line_valid = observation->valid;
-    input->line_age_ms = g_k230_line_age_ms;
     input->line_error_px = observation->error;
     input->line_angle_d10 = observation->angle_d10;
     input->line_quality = observation->quality;
     input->direction_mask = observation->direction_mask;
     input->junction_active = g_k230_junction_active;
-    input->imu_fresh = Bsp_Imu_IsHeadingFresh(APP_IMU_HEADING_MAX_AGE_MS);
+    input->imu_fresh = Bsp_Imu_IsHeadingFresh(
+        APP_DELIVERY_IMU_HEADING_MAX_AGE_MS);
     input->heading_deg = Bsp_Imu_GetHeadingDeg();
-    input->speed_faults = Bsp_Motor_GetSpeedFaults();
 }
 
 static void App_UpdateDeliveryManeuverWatch(
@@ -1904,13 +1904,6 @@ static void App_DeliveryLineTask(void)
     if (DeliveryManeuver_IsActive(&g_delivery_maneuver) != 0U) {
         DeliveryManeuver_Update(&g_delivery_maneuver, &input, &output);
 
-        if (output.request_yaw_zero != 0U) {
-            request_result = (input.imu_fresh != 0U) ?
-                Bsp_Imu_ZeroYaw() : 0U;
-            DeliveryManeuver_ReportYawZero(
-                &g_delivery_maneuver,
-                request_result);
-        }
         if (output.request_commit != 0U) {
             request_result =
                 DeliveryTask_CommitPendingDecision(&g_delivery_task);
@@ -2470,6 +2463,17 @@ uint8_t App_DeliveryStartIdentification(void)
 {
     K230_DigitFrame stale_frame;
     uint8_t request_result;
+
+    /*
+     * 屏幕可能因按键抖动或重发再次送来 IDENTIFY。送药任务一旦启动，
+     * 重复命令只返回已受理，不能停车、递增 epoch 或重置正在执行的路口动作。
+     * 需要重新识别时必须先显式发送 DELIVERY_RESET。
+     */
+    if ((g_delivery_start_pending != 0U) ||
+        (g_delivery_task.state != DELIVERY_STATE_IDLE) ||
+        (DeliveryManeuver_IsActive(&g_delivery_maneuver) != 0U)) {
+        return 1U;
+    }
 
     if ((g_app_current_mode == APP_MODE_LINE_FOLLOW) &&
         (g_speed_pid_initialized != 0U)) {

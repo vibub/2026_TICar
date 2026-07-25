@@ -47,6 +47,8 @@
 
 #define BSP_IMU_POLL_PERIOD_MS        (10U)
 #define BSP_IMU_I2C_TIMEOUT_LOOPS     (200000U)
+/* MSPM0 I2C_ERR_13 要求启动传输后等待至少 3 个 I2C 时钟；400 kHz 下取 8 μs。 */
+#define BSP_IMU_I2C_START_DELAY_CYCLES ((CPUCLK_FREQ / 1000000U) * 8U)
 #define BSP_IMU_MAX_FIFO_DRAIN        (32U)
 #define BSP_IMU_CALIBRATION_SAMPLES   (180U)
 #define BSP_IMU_STILL_LIMIT_DPS       (5.0f)
@@ -293,6 +295,7 @@ static uint8_t Bsp_Imu_ReadRegisters(
         DL_I2C_INTERRUPT_CONTROLLER_ARBITRATION_LOST);
     DL_I2C_startControllerTransfer(I2C_LSM6DSV16X_INST, address,
         DL_I2C_CONTROLLER_DIRECTION_RX, length);
+    delay_cycles(BSP_IMU_I2C_START_DELAY_CYCLES);
 
     while (transfer_done == 0U) {
         while ((!DL_I2C_isControllerRXFIFOEmpty(I2C_LSM6DSV16X_INST)) &&
@@ -347,6 +350,7 @@ static uint8_t Bsp_Imu_WriteRegister(uint8_t address, uint8_t reg, uint8_t value
         DL_I2C_INTERRUPT_CONTROLLER_ARBITRATION_LOST);
     DL_I2C_startControllerTransfer(I2C_LSM6DSV16X_INST, address,
         DL_I2C_CONTROLLER_DIRECTION_TX, 2U);
+    delay_cycles(BSP_IMU_I2C_START_DELAY_CYCLES);
 
     while (DL_I2C_getRawInterruptStatus(I2C_LSM6DSV16X_INST,
                DL_I2C_INTERRUPT_CONTROLLER_TX_DONE) == 0U) {
