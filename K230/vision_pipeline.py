@@ -19,6 +19,7 @@ class VisionPipeline:
         display_size=(800, 480),
         hmirror=True,
         vflip=True,
+        to_ide=True,
     ):
         # 传统视觉使用低分辨率 RGB565，保证红线检测可以稳定高频运行。
         self.cv_size = (
@@ -38,6 +39,8 @@ class VisionPipeline:
         # 同时启用水平镜像和垂直翻转，可让显示、传统视觉和 AI 三个通道方向一致。
         self.hmirror = bool(hmirror)
         self.vflip = bool(vflip)
+        # 比赛模式可关闭 IDE 视频镜像，只保留 LCD，降低 USB/显示复制带宽。
+        self.to_ide = bool(to_ide)
 
         self.sensor = None
         self.osd_img = None
@@ -127,7 +130,7 @@ class VisionPipeline:
             Display.ST7701,
             width=self.display_size[0],
             height=self.display_size[1],
-            to_ide=True
+            to_ide=self.to_ide
         )
         self._display_initialized = True
         print("S20.5: Display初始化完成")
@@ -142,8 +145,12 @@ class VisionPipeline:
         self._sensor_started = True
         print("S20.9: Sensor启动完成")
 
-    def capture_ai_frame(self):
-        frame = self.sensor.snapshot(chn=CAM_CHN_ID_2)
+    def capture_ai_frame(self, timeout_ms=1000):
+        """获取 AI 帧；调用方可缩短超时，避免低优先级推理长期阻塞。"""
+        frame = self.sensor.snapshot(
+            chn=CAM_CHN_ID_2,
+            timeout=int(timeout_ms),
+        )
         return frame, frame.to_numpy_ref()
 
     def capture_vision_frame(self):
