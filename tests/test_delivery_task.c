@@ -243,6 +243,54 @@ static int test_decide_retries_after_transient_direction_loss(void)
     return 1;
 }
 
+static int test_decide_preserves_junction_mask_while_waiting_yolo(void)
+{
+    DeliveryTask task;
+    DeliveryTask_Input input = empty_input();
+
+    reset_harness();
+    DeliveryTask_Init(&task);
+    task.target_digit = 6U;
+    task.target_locked = 1U;
+    task.state = DELIVERY_STATE_FOLLOW;
+    task.route_region = K230_ROUTE_REGION_FAR;
+    CHECK(RoutePlanner_SetTarget(&task.planner, 6U) == 1U);
+    CHECK(RoutePlanner_SetRegion(
+              &task.planner, K230_ROUTE_REGION_FAR) == 1U);
+
+    /* 进入路口时已经可靠看到左支路，但 YOLO 尚未产生新数字帧。 */
+    input.junction_active = 1U;
+    input.direction_mask = K230_LINE_DIRECTION_LEFT |
+                           K230_LINE_DIRECTION_FRONT;
+    input.digit_new = 0U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+    CHECK((task.junction_direction_mask &
+           K230_LINE_DIRECTION_LEFT) != 0U);
+
+    /* 停车等待超过路口保持时间后，应用层可能只剩 FRONT，但不能丢掉左支路。 */
+    input.junction_active = 0U;
+    input.direction_mask = K230_LINE_DIRECTION_FRONT;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+    CHECK((task.junction_direction_mask &
+           K230_LINE_DIRECTION_LEFT) != 0U);
+
+    /* 后续 YOLO 达成目标共识时，仍应使用进入路口时的方向证据执行左转。 */
+    input.digit_new = 1U;
+    input.digit_fresh = 1U;
+    input.digit.valid = 1U;
+    input.digit.digit = 6U;
+    input.digit.side = K230_DIGIT_SIDE_LEFT;
+    input.digit.flags = K230_DIGIT_FLAG_VALID |
+                        K230_DIGIT_FLAG_TARGET_MATCH |
+                        K230_DIGIT_FLAG_CONSENSUS;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_HOLD);
+    CHECK(task.pending_decision == ROUTE_DECISION_LEFT);
+    return 1;
+}
+
 static int test_decide_state_stops_until_digit_arrives(void)
 {
     DeliveryTask task;
@@ -321,6 +369,7 @@ int main(void)
         !test_route_uses_target_and_region_commands() ||
         !test_middle_target_selects_observed_side() ||
         !test_decide_retries_after_transient_direction_loss() ||
+        !test_decide_preserves_junction_mask_while_waiting_yolo() ||
         !test_decide_state_stops_until_digit_arrives() ||
         !test_line_timeout_enters_fault() ||
         !test_visual_command_resends_until_ack()) {

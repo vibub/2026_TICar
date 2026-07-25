@@ -36,6 +36,8 @@ typedef struct {
     uint8_t route_region;
     uint8_t junction_id;
     uint8_t previous_junction_active;
+    /* 进入 DECIDE 时锁存当前路口方向，避免停车等待 YOLO 期间方向位被清除。 */
+    uint8_t junction_direction_mask;
     uint8_t visual_mode;
     uint8_t visual_command_pending;
     uint32_t last_visual_command_ms;

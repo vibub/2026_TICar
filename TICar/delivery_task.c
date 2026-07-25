@@ -189,8 +189,17 @@ void DeliveryTask_Update(DeliveryTask *task, const DeliveryTask_Input *input)
         if (task->junction_id == ROUTE_PLANNER_NO_JUNCTION) {
             task->junction_id = DELIVERY_JUNCTION_ID_FIRST;
         }
+        /*
+         * 小车在 DECIDE 中会停车等待 YOLO 达成共识，时间可能超过应用层
+         * 300 ms 的路口清除保持时间，因此方向证据必须由任务状态机独立保存。
+         */
+        task->junction_direction_mask = input->direction_mask;
         task->state = DELIVERY_STATE_DECIDE;
         (void) DeliveryTask_SendVisualCommand(task, K230_VISUAL_MODE_TARGET);
+    } else if ((task->state == DELIVERY_STATE_DECIDE) &&
+               (input->direction_mask != 0U)) {
+        /* 等待数字期间继续合并新方向证据，但不能丢失最初看到的左右支路。 */
+        task->junction_direction_mask |= input->direction_mask;
     }
 
     if ((task->state != DELIVERY_STATE_DECIDE) ||
@@ -202,7 +211,7 @@ void DeliveryTask_Update(DeliveryTask *task, const DeliveryTask_Input *input)
     observation.digit = input->digit.digit;
     observation.side = input->digit.side;
     observation.digit_flags = input->digit.flags;
-    observation.direction_mask = input->direction_mask;
+    observation.direction_mask = task->junction_direction_mask;
     decision = RoutePlanner_Decide(
         &task->planner,
         task->junction_id,
@@ -243,6 +252,7 @@ uint8_t DeliveryTask_CommitPendingDecision(DeliveryTask *task)
     task->route_region = next_region;
     RoutePlanner_ClearJunction(&task->planner, task->junction_id);
     task->previous_junction_active = 1U;
+    task->junction_direction_mask = 0U;
     task->pending_decision = ROUTE_DECISION_NONE;
     task->state = DELIVERY_STATE_FOLLOW;
     (void) DeliveryTask_SendVisualCommand(task, K230_VISUAL_MODE_TARGET);
