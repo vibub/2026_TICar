@@ -10,6 +10,8 @@
 
 #define DELIVERY_VISUAL_RESEND_MS 500U
 #define DELIVERY_JUNCTION_ID_FIRST 1U
+/* 至少等待一轮 YOLO 共识窗口，禁止首个未确认 D 帧直接锁存 FRONT。 */
+#define DELIVERY_DECIDE_WAIT_MS 1200U
 
 static uint8_t DeliveryTask_NextRegion(
     const DeliveryTask *task,
@@ -154,9 +156,11 @@ static void DeliveryTask_UpdateTargetLock(
 
 void DeliveryTask_Update(DeliveryTask *task, const DeliveryTask_Input *input)
 {
-    RoutePlanner_Observation observation;
+    RoutePlanner_Observation observation = {0};
     RoutePlanner_Decision decision;
+    uint32_t now_ms;
     uint8_t new_junction;
+    uint8_t target_consensus_ready;
 
     if ((task == NULL) || (input == NULL) ||
         (task->state == DELIVERY_STATE_IDLE) ||
@@ -181,6 +185,7 @@ void DeliveryTask_Update(DeliveryTask *task, const DeliveryTask_Input *input)
         return;
     }
 
+    now_ms = Bsp_Time_GetMilliseconds();
     new_junction = (input->junction_active != 0U) &&
                    (task->previous_junction_active == 0U);
     task->previous_junction_active = input->junction_active;
@@ -194,6 +199,7 @@ void DeliveryTask_Update(DeliveryTask *task, const DeliveryTask_Input *input)
          * 300 ms 的路口清除保持时间，因此方向证据必须由任务状态机独立保存。
          */
         task->junction_direction_mask = input->direction_mask;
+        task->decision_start_ms = now_ms;
         task->state = DELIVERY_STATE_DECIDE;
         (void) DeliveryTask_SendVisualCommand(task, K230_VISUAL_MODE_TARGET);
     } else if ((task->state == DELIVERY_STATE_DECIDE) &&
@@ -202,15 +208,34 @@ void DeliveryTask_Update(DeliveryTask *task, const DeliveryTask_Input *input)
         task->junction_direction_mask |= input->direction_mask;
     }
 
-    if ((task->state != DELIVERY_STATE_DECIDE) ||
-        (input->digit_new == 0U)) {
+    if (task->state != DELIVERY_STATE_DECIDE) {
         return;
     }
 
-    observation.digit_valid = input->digit.valid;
-    observation.digit = input->digit.digit;
-    observation.side = input->digit.side;
-    observation.digit_flags = input->digit.flags;
+    target_consensus_ready =
+        ((input->digit_new != 0U) &&
+         (input->digit_fresh != 0U) &&
+         (input->digit.valid != 0U) &&
+         (input->digit.digit == task->target_digit) &&
+         ((input->digit.flags & K230_DIGIT_FLAG_TARGET_MATCH) != 0U) &&
+         ((input->digit.flags & K230_DIGIT_FLAG_CONSENSUS) != 0U)) ? 1U : 0U;
+
+    /*
+     * 目标尚未形成共识时先保持 DECIDE，避免第一个无效或未确认 D 帧
+     * 立即被规划为 FRONT。等待完整共识窗口后才允许按“未发现目标”处理。
+     */
+    if ((target_consensus_ready == 0U) &&
+        ((uint32_t) (now_ms - task->decision_start_ms) <
+         DELIVERY_DECIDE_WAIT_MS)) {
+        return;
+    }
+
+    if (input->digit_new != 0U) {
+        observation.digit_valid = input->digit.valid;
+        observation.digit = input->digit.digit;
+        observation.side = input->digit.side;
+        observation.digit_flags = input->digit.flags;
+    }
     observation.direction_mask = task->junction_direction_mask;
     decision = RoutePlanner_Decide(
         &task->planner,
@@ -253,6 +278,7 @@ uint8_t DeliveryTask_CommitPendingDecision(DeliveryTask *task)
     RoutePlanner_ClearJunction(&task->planner, task->junction_id);
     task->previous_junction_active = 1U;
     task->junction_direction_mask = 0U;
+    task->decision_start_ms = 0U;
     task->pending_decision = ROUTE_DECISION_NONE;
     task->state = DELIVERY_STATE_FOLLOW;
     (void) DeliveryTask_SendVisualCommand(task, K230_VISUAL_MODE_TARGET);

@@ -13,6 +13,9 @@
 #define MANEUVER_APPROACH_CENTER_CM 20.0f /* 识别路口后继续前进到旋转中心的距离，单位 cm。 */
 #define MANEUVER_APPROACH_MAX_CM 30.0f /* 进入路口中心阶段允许单轮行驶的最大距离，单位 cm。 */
 #define MANEUVER_APPROACH_TIMEOUT_MS 2500U /* 进入路口中心阶段的最长允许时间，单位 ms。 */
+#define MANEUVER_APPROACH_BLIND_SPEED_CM_S 10.0f /* 路口内看不到红线时依靠编码器继续直行的基础轮速，单位 cm/s。 */
+#define MANEUVER_APPROACH_HEADING_KP 0.30f /* 丢线直行时 IMU 航向误差到轮速差修正的比例系数。 */
+#define MANEUVER_APPROACH_CORRECTION_LIMIT_CM_S 4.0f /* 丢线直行时单侧轮速修正的最大值，单位 cm/s。 */
 #define MANEUVER_LINE_BAD_GRACE_MS 200U /* 巡线阶段允许红线短暂无效的宽限时间，单位 ms。 */
 #define MANEUVER_LINE_MAX_AGE_MS 400U /* 可用于动作控制的红线帧最大年龄，单位 ms。 */
 #define MANEUVER_TURN_SETTLE_MS 150U /* 开始 IMU 清零前的车体静止稳定时间，单位 ms。 */
@@ -291,6 +294,7 @@ void DeliveryManeuver_Update(
     float heading_error; /* IMU 目标航向与当前航向之间的归一化误差，单位 °。 */
     float turn_sign; /* 原地转向方向，1 表示左转，-1 表示右转。 */
     float turn_speed; /* 当前粗转或细转使用的轮速，单位 cm/s。 */
+    float approach_correction; /* 进入路口中心丢线后使用的 IMU 差速修正量，单位 cm/s。 */
     uint8_t centered; /* 红线横向和角度误差是否同时满足居中要求。 */
 
     if (output == NULL) {
@@ -330,6 +334,8 @@ void DeliveryManeuver_Update(
                     input->now_ms,
                     maneuver->state_start_ms,
                     MANEUVER_BRAKE_MS) != 0U) {
+                /* 路口内主线可能被横线遮断，提前保存当前航向供丢线后直行。 */
+                maneuver->approach_heading_deg = input->heading_deg;
                 Maneuver_EnterState(
                     maneuver,
                     DELIVERY_MANEUVER_STATE_APPROACH_CENTER,
@@ -350,7 +356,10 @@ void DeliveryManeuver_Update(
                         DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
                 break;
             }
-            if (Maneuver_HandleLineLoss(maneuver, input) == 0U) {
+            if (Maneuver_LineTransportUsable(input) == 0U) {
+                Maneuver_SetFault(
+                    maneuver,
+                    DELIVERY_MANEUVER_FAULT_LINE_TIMEOUT);
                 break;
             }
             if (center_distance >= MANEUVER_APPROACH_CENTER_CM) {
@@ -369,7 +378,36 @@ void DeliveryManeuver_Update(
                 }
                 break;
             }
-            Maneuver_SetOutputFollow(output);
+            if (Maneuver_LineUsable(input) != 0U) {
+                Maneuver_SetOutputFollow(output);
+                break;
+            }
+
+            /*
+             * 十字或 T 字路口中心的纵向红线可能暂时不可见。此时不再因 valid=0
+             * 停车，而是用进入路口前保存的 IMU 航向和编码器距离继续驶向旋转中心。
+             */
+            if (input->imu_fresh == 0U) {
+                Maneuver_SetFault(maneuver, DELIVERY_MANEUVER_FAULT_IMU);
+                break;
+            }
+            heading_error = Maneuver_NormalizeAngle(
+                maneuver->approach_heading_deg - input->heading_deg);
+            approach_correction =
+                heading_error * MANEUVER_APPROACH_HEADING_KP;
+            if (approach_correction >
+                MANEUVER_APPROACH_CORRECTION_LIMIT_CM_S) {
+                approach_correction =
+                    MANEUVER_APPROACH_CORRECTION_LIMIT_CM_S;
+            } else if (approach_correction <
+                       -MANEUVER_APPROACH_CORRECTION_LIMIT_CM_S) {
+                approach_correction =
+                    -MANEUVER_APPROACH_CORRECTION_LIMIT_CM_S;
+            }
+            Maneuver_SetOutputWheelSpeed(
+                output,
+                MANEUVER_APPROACH_BLIND_SPEED_CM_S - approach_correction,
+                MANEUVER_APPROACH_BLIND_SPEED_CM_S + approach_correction);
             break;
 
         case DELIVERY_MANEUVER_STATE_TURN:

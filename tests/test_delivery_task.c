@@ -159,6 +159,12 @@ static int test_route_uses_target_and_region_commands(void)
     input.digit_fresh = 1U;
     input.digit.valid = 0U;
     DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+    CHECK(task.pending_decision == ROUTE_DECISION_NONE);
+
+    /* 未识别到目标时等待完整 YOLO 共识窗口，超时后才决定直行。 */
+    s_now_ms = 1200U;
+    DeliveryTask_Update(&task, &input);
     CHECK(task.state == DELIVERY_STATE_HOLD);
     CHECK(task.pending_decision == ROUTE_DECISION_FRONT);
     CHECK(s_sent_mode == K230_VISUAL_MODE_OFF);
@@ -201,6 +207,46 @@ static int test_middle_target_selects_observed_side(void)
     CHECK(task.state == DELIVERY_STATE_HOLD);
     CHECK(DeliveryTask_HasPendingTurn(&task) == 1U);
     CHECK(DeliveryTask_IsMotionAllowed(&task) == 0U);
+    return 1;
+}
+
+static int test_target_waits_for_consensus_before_route_decision(void)
+{
+    DeliveryTask task;
+    DeliveryTask_Input input = empty_input();
+
+    reset_harness();
+    DeliveryTask_Init(&task);
+    task.target_digit = 6U;
+    task.target_locked = 1U;
+    task.state = DELIVERY_STATE_FOLLOW;
+    task.route_region = K230_ROUTE_REGION_NEAR;
+    CHECK(RoutePlanner_SetTarget(&task.planner, 6U) == 1U);
+    CHECK(RoutePlanner_SetRegion(
+              &task.planner, K230_ROUTE_REGION_NEAR) == 1U);
+
+    input.junction_active = 1U;
+    input.direction_mask = K230_LINE_DIRECTION_LEFT |
+                           K230_LINE_DIRECTION_FRONT |
+                           K230_LINE_DIRECTION_RIGHT;
+    input.digit_new = 1U;
+    input.digit_fresh = 1U;
+    input.digit.valid = 1U;
+    input.digit.digit = 6U;
+    input.digit.side = K230_DIGIT_SIDE_LEFT;
+    input.digit.flags = K230_DIGIT_FLAG_VALID |
+                        K230_DIGIT_FLAG_TARGET_MATCH;
+    DeliveryTask_Update(&task, &input);
+
+    /* 首次看到正确目标但尚未达成共识时，不能提前锁存 FRONT。 */
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+    CHECK(task.pending_decision == ROUTE_DECISION_NONE);
+
+    s_now_ms = 600U;
+    input.digit.flags |= K230_DIGIT_FLAG_CONSENSUS;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_HOLD);
+    CHECK(task.pending_decision == ROUTE_DECISION_LEFT);
     return 1;
 }
 
@@ -368,6 +414,7 @@ int main(void)
         !test_reset_sends_plain_off_command() ||
         !test_route_uses_target_and_region_commands() ||
         !test_middle_target_selects_observed_side() ||
+        !test_target_waits_for_consensus_before_route_decision() ||
         !test_decide_retries_after_transient_direction_loss() ||
         !test_decide_preserves_junction_mask_while_waiting_yolo() ||
         !test_decide_state_stops_until_digit_arrives() ||

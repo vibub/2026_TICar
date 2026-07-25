@@ -41,6 +41,7 @@ typedef struct {
     uint8_t visual_mode;
     uint8_t visual_command_pending;
     uint32_t last_visual_command_ms;
+    uint32_t decision_start_ms; /* 进入 DECIDE 的时间，用于等待 YOLO 完成共识窗口。 */
     RoutePlanner_Decision pending_decision;
     RoutePlanner planner;
 } DeliveryTask;

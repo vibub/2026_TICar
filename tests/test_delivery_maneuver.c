@@ -136,6 +136,38 @@ static int test_right_turn_uses_mirrored_wheel_targets(void)
     return 1;
 }
 
+static int test_approach_uses_imu_when_line_disappears_in_junction(void)
+{
+    DeliveryManeuver maneuver;
+    DeliveryManeuver_Input input = default_input();
+    DeliveryManeuver_Output output;
+
+    DeliveryManeuver_Init(&maneuver);
+    CHECK(DeliveryManeuver_Start(
+              &maneuver, ROUTE_DECISION_LEFT, &input) == 1U);
+    update_at(&maneuver, &input, &output, 300U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER);
+
+    /* 路口横线遮断纵向红线后，L 帧仍新鲜，但视觉结果暂时无效。 */
+    input.line_valid = 0U;
+    input.line_fresh = 1U;
+    input.line_age_ms = 0U;
+    input.imu_fresh = 1U;
+    input.heading_deg = -5.0f;
+    update_at(&maneuver, &input, &output, 320U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_WHEEL_SPEED);
+    CHECK(output.left_target_cm_s < output.right_target_cm_s);
+    CHECK(output.left_target_cm_s > 0.0f);
+
+    /* 编码器到达预设路口中心距离后，即使仍看不到线也必须开始转向。 */
+    input.left_position_cm = 20.2f;
+    input.right_position_cm = 20.2f;
+    update_at(&maneuver, &input, &output, 340U);
+    CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_TURN);
+    return 1;
+}
+
 static int test_front_crosses_before_commit(void)
 {
     DeliveryManeuver maneuver;
@@ -250,6 +282,7 @@ int main(void)
 {
     if (!test_left_turn_full_path() ||
         !test_right_turn_uses_mirrored_wheel_targets() ||
+        !test_approach_uses_imu_when_line_disappears_in_junction() ||
         !test_front_crosses_before_commit() ||
         !test_reacquire_requires_new_frames() ||
         !test_faults_stop_the_maneuver() ||

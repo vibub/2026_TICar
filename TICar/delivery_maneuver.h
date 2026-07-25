@@ -87,6 +87,7 @@ typedef struct {
     float state_start_left_cm;
     float state_start_right_cm;
     float target_heading_deg;
+    float approach_heading_deg; /* 进入路口中心时保持的 IMU 直行航向，单位 °。 */
 
     uint8_t line_stable_count;
     uint8_t junction_clear_count;
