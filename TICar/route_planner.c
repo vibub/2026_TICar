@@ -79,7 +79,9 @@ RoutePlanner_Decision RoutePlanner_Decide(
     }
 
     if ((planner->latched_junction_id == junction_id) &&
-        (planner->latched_decision != ROUTE_DECISION_NONE)) {
+        ((planner->latched_decision == ROUTE_DECISION_LEFT) ||
+         (planner->latched_decision == ROUTE_DECISION_RIGHT) ||
+         (planner->latched_decision == ROUTE_DECISION_FRONT))) {
         return planner->latched_decision;
     }
 
@@ -120,8 +122,16 @@ RoutePlanner_Decision RoutePlanner_Decide(
         }
     }
 
-    planner->latched_junction_id = junction_id;
-    planner->latched_decision = decision;
+    /*
+     * HOLD 只表示当前帧证据不足，不能锁死整个路口。数字方位或路口方向位
+     * 在相邻帧可能暂时抖动，只有可执行动作才锁存，后续 D 帧才能重新决策。
+     */
+    if ((decision == ROUTE_DECISION_LEFT) ||
+        (decision == ROUTE_DECISION_RIGHT) ||
+        (decision == ROUTE_DECISION_FRONT)) {
+        planner->latched_junction_id = junction_id;
+        planner->latched_decision = decision;
+    }
     return decision;
 }
 

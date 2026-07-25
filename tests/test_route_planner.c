@@ -86,6 +86,39 @@ static int test_direction_mask_blocks_unsafe_turn(void)
     return 1;
 }
 
+static int test_hold_retries_when_direction_evidence_recovers(void)
+{
+    RoutePlanner planner;
+    RoutePlanner_Observation centered_target = observation(
+        6U, K230_DIGIT_SIDE_CENTER,
+        K230_LINE_DIRECTION_LEFT | K230_LINE_DIRECTION_FRONT, 1U);
+    RoutePlanner_Observation missing_left = observation(
+        6U, K230_DIGIT_SIDE_LEFT, K230_LINE_DIRECTION_FRONT, 1U);
+    RoutePlanner_Observation recovered_left = observation(
+        6U, K230_DIGIT_SIDE_LEFT,
+        K230_LINE_DIRECTION_LEFT | K230_LINE_DIRECTION_FRONT, 1U);
+
+    RoutePlanner_Init(&planner);
+    CHECK(RoutePlanner_SetTarget(&planner, 6U) == 1U);
+    CHECK(RoutePlanner_SetRegion(&planner, K230_ROUTE_REGION_FAR) == 1U);
+
+    /* 数字框暂时落在中心区时安全等待，但不能把 HOLD 永久锁死。 */
+    CHECK(RoutePlanner_Decide(
+              &planner, 4U, &centered_target) == ROUTE_DECISION_HOLD);
+    CHECK(planner.latched_decision == ROUTE_DECISION_NONE);
+
+    /* 左侧方位已确认但该帧缺少左支路时仍等待，并允许后续继续重试。 */
+    CHECK(RoutePlanner_Decide(
+              &planner, 4U, &missing_left) == ROUTE_DECISION_HOLD);
+    CHECK(planner.latched_decision == ROUTE_DECISION_NONE);
+
+    /* 后续红线方向位恢复后，同一 junction_id 必须能够重新得到左转。 */
+    CHECK(RoutePlanner_Decide(
+              &planner, 4U, &recovered_left) == ROUTE_DECISION_LEFT);
+    CHECK(planner.latched_decision == ROUTE_DECISION_LEFT);
+    return 1;
+}
+
 static int test_near_room_fixed_direction_still_checks_line(void)
 {
     RoutePlanner planner;
@@ -161,6 +194,7 @@ int main(void)
     if (!test_random_digits_follow_observed_side() ||
         !test_non_target_at_middle_continues_front() ||
         !test_direction_mask_blocks_unsafe_turn() ||
+        !test_hold_retries_when_direction_evidence_recovers() ||
         !test_near_room_fixed_direction_still_checks_line() ||
         !test_same_junction_is_latched() ||
         !test_path_and_return_are_reversed()) {

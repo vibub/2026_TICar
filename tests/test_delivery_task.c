@@ -204,6 +204,45 @@ static int test_middle_target_selects_observed_side(void)
     return 1;
 }
 
+static int test_decide_retries_after_transient_direction_loss(void)
+{
+    DeliveryTask task;
+    DeliveryTask_Input input = empty_input();
+
+    reset_harness();
+    DeliveryTask_Init(&task);
+    task.target_digit = 6U;
+    task.target_locked = 1U;
+    task.state = DELIVERY_STATE_FOLLOW;
+    task.route_region = K230_ROUTE_REGION_FAR;
+    CHECK(RoutePlanner_SetTarget(&task.planner, 6U) == 1U);
+    CHECK(RoutePlanner_SetRegion(
+              &task.planner, K230_ROUTE_REGION_FAR) == 1U);
+
+    input.junction_active = 1U;
+    input.direction_mask = K230_LINE_DIRECTION_FRONT;
+    input.digit_new = 1U;
+    input.digit_fresh = 1U;
+    input.digit.valid = 1U;
+    input.digit.digit = 6U;
+    input.digit.side = K230_DIGIT_SIDE_LEFT;
+    input.digit.flags = K230_DIGIT_FLAG_VALID |
+                        K230_DIGIT_FLAG_TARGET_MATCH |
+                        K230_DIGIT_FLAG_CONSENSUS;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+    CHECK(task.pending_decision == ROUTE_DECISION_NONE);
+
+    /* 下一帧路口方向恢复后，同一路口必须进入 LEFT 的自动动作流程。 */
+    input.direction_mask = K230_LINE_DIRECTION_LEFT |
+                           K230_LINE_DIRECTION_FRONT;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_HOLD);
+    CHECK(task.pending_decision == ROUTE_DECISION_LEFT);
+    CHECK(s_sent_mode == K230_VISUAL_MODE_OFF);
+    return 1;
+}
+
 static int test_decide_state_stops_until_digit_arrives(void)
 {
     DeliveryTask task;
@@ -281,6 +320,7 @@ int main(void)
         !test_reset_sends_plain_off_command() ||
         !test_route_uses_target_and_region_commands() ||
         !test_middle_target_selects_observed_side() ||
+        !test_decide_retries_after_transient_direction_loss() ||
         !test_decide_state_stops_until_digit_arrives() ||
         !test_line_timeout_enters_fault() ||
         !test_visual_command_resends_until_ack()) {

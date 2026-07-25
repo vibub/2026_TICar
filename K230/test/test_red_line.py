@@ -221,6 +221,24 @@ class RedLineMathTest(unittest.TestCase):
             DIRECTION_LEFT | DIRECTION_FRONT | DIRECTION_RIGHT,
         )
 
+    def test_isolated_invalid_frames_hold_last_reliable_line(self):
+        detector = RedLineDetector()
+        reliable = detector.detect(make_fake_image())
+        self.assertTrue(reliable.valid)
+
+        # 相同场景中偶发一两个 ROI 全部未成 blob 时，短时保持上次可靠控制量。
+        first_miss = detector.detect(FakeImage({}))
+        second_miss = detector.detect(FakeImage({}))
+        third_miss = detector.detect(FakeImage({}))
+
+        self.assertTrue(first_miss.valid)
+        self.assertTrue(second_miss.valid)
+        self.assertEqual(first_miss.error_x, reliable.error_x)
+        self.assertEqual(second_miss.direction_mask, reliable.direction_mask)
+        self.assertLess(first_miss.quality, reliable.quality)
+        self.assertLessEqual(second_miss.quality, first_miss.quality)
+        self.assertFalse(third_miss.valid)
+
     def test_fit_matches_known_slope(self):
         points = [
             point(0.2 * y + 100.0, y, weight, roi_index=index)

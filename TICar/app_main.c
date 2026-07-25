@@ -441,6 +441,8 @@ volatile int16_t g_k230_line_angle_d10;
 volatile uint8_t g_k230_line_quality;
 volatile uint8_t g_k230_line_direction_mask;
 volatile uint8_t g_k230_junction_active;
+/* 路口激活期间锁存稳定出现过的方向位，避免数字帧恰逢单帧丢线而无法转弯。 */
+volatile uint8_t g_k230_junction_direction_mask;
 volatile uint8_t g_k230_junction_confirm_count;
 volatile uint8_t g_k230_junction_clear_count;
 volatile uint32_t g_k230_junction_last_side_ms;
@@ -677,6 +679,7 @@ static void App_ResetLineState(void)
     g_k230_line_quality = 0U;
     g_k230_line_direction_mask = 0U;
     g_k230_junction_active = 0U;
+    g_k230_junction_direction_mask = 0U;
     g_k230_junction_confirm_count = 0U;
     g_k230_junction_clear_count = 0U;
     g_k230_junction_last_side_ms = 0U;
@@ -1436,6 +1439,15 @@ static void App_UpdateK230JunctionState(const App_LineObservation *observation)
                 (K230_LINE_DIRECTION_LEFT | K230_LINE_DIRECTION_RIGHT);
 
     if (side_mask != 0U) {
+        if ((g_k230_junction_active == 0U) &&
+            (g_k230_junction_confirm_count == 0U)) {
+            g_k230_junction_direction_mask = 0U;
+        }
+        /*
+         * 数字 D 帧与红线 L 帧异步到达。路口确认后保留这一事件中稳定出现过的
+         * 方向，避免数字识别完成时恰好拿到 FRONT-only 或短暂丢线帧。
+         */
+        g_k230_junction_direction_mask |= observation->direction_mask;
         if (g_k230_junction_confirm_count < APP_K230_LINE_JUNCTION_CONFIRM_FRAMES) {
             g_k230_junction_confirm_count++;
         }
@@ -1448,6 +1460,9 @@ static void App_UpdateK230JunctionState(const App_LineObservation *observation)
     }
 
     g_k230_junction_confirm_count = 0U;
+    if (g_k230_junction_active == 0U) {
+        g_k230_junction_direction_mask = 0U;
+    }
     if (observation->direction_mask == K230_LINE_DIRECTION_FRONT) {
         if (g_k230_junction_clear_count < APP_K230_LINE_JUNCTION_CLEAR_FRAMES) {
             g_k230_junction_clear_count++;
@@ -1457,6 +1472,7 @@ static void App_UpdateK230JunctionState(const App_LineObservation *observation)
             ((uint32_t) (now_ms - g_k230_junction_last_side_ms) >=
              APP_K230_LINE_JUNCTION_HOLD_MS)) {
             g_k230_junction_active = 0U;
+            g_k230_junction_direction_mask = 0U;
         }
     } else {
         g_k230_junction_clear_count = 0U;
@@ -1539,7 +1555,9 @@ static void App_DeliveryTaskUpdate(const App_LineObservation *line_observation)
         input.line_fresh = line_observation->fresh;
         input.line_valid = line_observation->valid;
         input.junction_active = g_k230_junction_active;
-        input.direction_mask = line_observation->direction_mask;
+        input.direction_mask = (g_k230_junction_active != 0U) ?
+                               g_k230_junction_direction_mask :
+                               line_observation->direction_mask;
     }
     input.digit_fresh = Protocol_K230_IsDigitFresh();
     input.digit_new = Protocol_K230_TakeLatestDigitFrame(&digit_frame);
@@ -1696,6 +1714,7 @@ static uint8_t App_K230ObservationReadyForFollow(
         }
         g_k230_line_recovery_count = 0U;
         g_k230_junction_active = 0U;
+        g_k230_junction_direction_mask = 0U;
         App_LineStopForState(APP_LINE_CONTROL_TIMEOUT_STOP);
         return 0U;
     }
