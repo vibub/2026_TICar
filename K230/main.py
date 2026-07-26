@@ -28,10 +28,16 @@ DIGIT_MODEL_INPUT_SIZE = [320, 320]
 DIGIT_MODEL_PATH = "/sdcard/models/yolo11n_det_320.kmodel"
 DIGIT_LABELS = ["1", "2", "3", "4", "5", "6", "7", "8"]
 DIGIT_CONFIDENCE_THRESHOLD = 0.60
-DIGIT_INFERENCE_INTERVAL_MS = 200
+# 4 Hz 足以在 1200 ms 决策窗口内形成 3 帧共识，同时给红线循环留出余量。
+DIGIT_INFERENCE_INTERVAL_MS = 250
+# AI 通道异常时禁止沿用 snapshot 默认 1000 ms 超时长期阻塞红线。
+DIGIT_CAPTURE_TIMEOUT_MS = 60
 DIGIT_DEBUG_INTERVAL_RUNS = 10
 DIGIT_OVERLAY_HOLD_MS = 800
-OSD_UPDATE_INTERVAL_MS = 80
+# 全屏 ARGB OSD 仅用于观察，5 Hz 已足够且可明显降低显示复制带宽。
+OSD_UPDATE_INTERVAL_MS = 200
+DELIVERY_GC_INTERVAL_MS = 2000
+DELIVERY_IDE_PREVIEW = False
 
 NMS_THRESHOLD = 0.45
 DEAD_ZONE_X = 5
@@ -247,8 +253,10 @@ def draw_delivery_overlay(
     last_yolo_result_ms,
     locked_overlay,
     now_ms,
+    max_line_processing_ms,
     max_line_send_gap_ms,
     max_digit_inference_ms,
+    yolo_load_ms,
 ):
     """使用YOLO原生绘制叠加数字框，再补充红线和UART状态。"""
     global osd_error_logged
@@ -332,10 +340,16 @@ def draw_delivery_overlay(
         )
         _draw_osd_text(
             osd, 8, 102,
-            "GAP{}ms YOLO{}ms".format(
+            "LINE{}ms GAP{}ms YOLO{}ms".format(
+                max_line_processing_ms,
                 max_line_send_gap_ms,
                 max_digit_inference_ms,
             ),
+            white,
+        )
+        _draw_osd_text(
+            osd, 8, 126,
+            "YOLO LOAD{}ms".format(yolo_load_ms),
             white,
         )
 
@@ -441,6 +455,7 @@ def run_delivery_mode(
         cv_size=LINE_CV_SIZE,
         ai_size=AI_SIZE,
         display_size=DISPLAY_SIZE,
+        to_ide=DELIVERY_IDE_PREVIEW,
     )
     pipeline.create()
     red_line_detector = RedLineDetector()
@@ -448,20 +463,52 @@ def run_delivery_mode(
     route_consensus = DigitConsensus(history_size=5, required_votes=3)
     command = VisualCommand(constants["VISUAL_MODE_OFF"], 0, 0, 0)
 
+    # 模型加载约需数百毫秒，必须在实时红线计时开始前完成，避免首次 V 命令阻塞 L 帧。
+    yolo_load_start_ms = time.ticks_ms()
+    yolo = create_digit_yolo(YOLO11)
+    yolo_load_ms = time.ticks_diff(time.ticks_ms(), yolo_load_start_ms)
+
+    # 预热一次 AI 通道和 KPU，后续任务阶段只承担稳定的单帧推理开销。
+    warmup_frame = None
+    warmup_array = None
+    warmup_result = None
+    warmup_start_ms = time.ticks_ms()
+    try:
+        warmup_frame, warmup_array = pipeline.capture_ai_frame()
+        warmup_result = yolo.run(warmup_array)
+        print(
+            "S32D: 数字YOLO预热完成",
+            "load_ms=", yolo_load_ms,
+            "warmup_ms=", time.ticks_diff(time.ticks_ms(), warmup_start_ms),
+        )
+    except BaseException as error:
+        # 预热失败不销毁已加载模型，实时阶段仍可在下一次 V 命令时重试。
+        print("数字YOLO预热异常:")
+        sys.print_exception(error)
+    finally:
+        warmup_frame = None
+        warmup_array = None
+        warmup_result = None
+        gc.collect()
+
+    # 所有实时性能计时都从模型加载和预热完成后开始。
+    realtime_start_ms = time.ticks_ms()
     frame_count = 0
     digit_run_count = 0
     first_result_logged = False
-    last_line_send_ms = time.ticks_ms()
-    last_digit_run_ms = time.ticks_ms()
-    last_osd_ms = time.ticks_ms()
+    last_line_send_ms = realtime_start_ms
+    last_digit_run_ms = realtime_start_ms
+    last_osd_ms = realtime_start_ms
+    last_gc_ms = realtime_start_ms
     last_yolo_result = None
     last_yolo_result_ms = 0
     locked_overlay = False
+    max_line_processing_ms = 0
     max_line_send_gap_ms = 0
     max_digit_inference_ms = 0
     clock = time.clock()
 
-    print("K230比赛视觉启动：红线每帧，数字按V命令运行")
+    print("K230比赛视觉启动：红线优先，数字推理与OSD分时运行")
     print("V命令必须从UART2 RX IO{}输入，ACK从TX IO{}输出".format(
         K230_UART_RX_IO, K230_UART_TX_IO))
     print("CanMV IDE USB终端输入不会进入该硬件UART；命令支持CR、LF或CRLF结尾")
@@ -494,11 +541,19 @@ def run_delivery_mode(
                 last_yolo_result = None
                 last_yolo_result_ms = 0
 
-        # 红线始终优先运行和发送，数字推理不能跳过本轮传统视觉更新。
+        # 红线始终优先运行和发送，后续低优先级任务只能使用发送后的空档。
+        line_processing_start_ms = time.ticks_ms()
         vision_frame = pipeline.capture_vision_frame()
         line_result = red_line_detector.detect(vision_frame)
         vision_frame = None
+        line_processing_ms = time.ticks_diff(
+            time.ticks_ms(),
+            line_processing_start_ms,
+        )
+        if line_processing_ms > max_line_processing_ms:
+            max_line_processing_ms = line_processing_ms
 
+        line_sent = False
         now_ms = time.ticks_ms()
         if time.ticks_diff(now_ms, last_line_send_ms) >= LINE_SEND_INTERVAL_MS:
             line_gap_ms = time.ticks_diff(now_ms, last_line_send_ms)
@@ -506,21 +561,27 @@ def run_delivery_mode(
                 max_line_send_gap_ms = line_gap_ms
             uart.write(format_line_message(line_result))
             last_line_send_ms = now_ms
+            line_sent = True
 
+        # YOLO 只允许紧跟一次 L 帧发送运行，保证阻塞前下位机已拿到最新红线结果。
+        digit_ran = False
         digit_enabled = command.mode != constants["VISUAL_MODE_OFF"]
-        if digit_enabled and is_digit_inference_due(
+        if line_sent and digit_enabled and is_digit_inference_due(
             now_ms,
             last_digit_run_ms,
             DIGIT_INFERENCE_INTERVAL_MS,
         ):
-            if yolo is None:
-                yolo = create_digit_yolo(YOLO11)
-
+            digit_ran = True
             ai_frame = None
             ai_array = None
+            yolo_result = None
+            detections = None
+            detection = None
             inference_start_ms = time.ticks_ms()
             try:
-                ai_frame, ai_array = pipeline.capture_ai_frame()
+                ai_frame, ai_array = pipeline.capture_ai_frame(
+                    DIGIT_CAPTURE_TIMEOUT_MS,
+                )
                 yolo_result = yolo.run(ai_array)
 
                 if DEBUG_PRINT and not first_result_logged:
@@ -602,6 +663,9 @@ def run_delivery_mode(
             finally:
                 ai_frame = None
                 ai_array = None
+                yolo_result = None
+                detections = None
+                detection = None
 
             inference_ms = time.ticks_diff(time.ticks_ms(), inference_start_ms)
             if inference_ms > max_digit_inference_ms:
@@ -614,11 +678,19 @@ def run_delivery_mode(
                     "DIGIT PERF",
                     "last_ms=", inference_ms,
                     "max_ms=", max_digit_inference_ms,
+                    "line_max_ms=", max_line_processing_ms,
                     "line_max_gap_ms=", max_line_send_gap_ms,
+                    "load_ms=", yolo_load_ms,
                 )
 
+        # 全屏 OSD 与 YOLO 分开到不同轮次，并且同样只能占用 L 帧发送后的空档。
+        osd_updated = False
         osd_now_ms = time.ticks_ms()
-        if time.ticks_diff(osd_now_ms, last_osd_ms) >= OSD_UPDATE_INTERVAL_MS:
+        if (
+            line_sent and
+            not digit_ran and
+            time.ticks_diff(osd_now_ms, last_osd_ms) >= OSD_UPDATE_INTERVAL_MS
+        ):
             draw_delivery_overlay(
                 line_result,
                 command,
@@ -626,10 +698,13 @@ def run_delivery_mode(
                 last_yolo_result_ms,
                 locked_overlay,
                 osd_now_ms,
+                max_line_processing_ms,
                 max_line_send_gap_ms,
                 max_digit_inference_ms,
+                yolo_load_ms,
             )
-            last_osd_ms = osd_now_ms
+            last_osd_ms = time.ticks_ms()
+            osd_updated = True
 
         frame_count += 1
         if DEBUG_PRINT and frame_count % LINE_DEBUG_INTERVAL_FRAMES == 0:
@@ -638,14 +713,25 @@ def run_delivery_mode(
                 "valid=", int(line_result.valid),
                 "error=", line_result.error_x,
                 "mask=", line_result.direction_mask,
+                "line_ms=", line_processing_ms,
+                "line_max_ms=", max_line_processing_ms,
+                "gap_max_ms=", max_line_send_gap_ms,
                 "visual_mode=", command.mode,
                 "target=", command.target_digit,
                 "region=", command.route_region,
                 "fps=", clock.fps(),
             )
 
-        if frame_count % GC_INTERVAL_FRAMES == 0:
+        # GC 也不与 YOLO/OSD 叠加；即使发生停顿，停顿前已经发出了最新 L 帧。
+        gc_now_ms = time.ticks_ms()
+        if (
+            line_sent and
+            not digit_ran and
+            not osd_updated and
+            time.ticks_diff(gc_now_ms, last_gc_ms) >= DELIVERY_GC_INTERVAL_MS
+        ):
             gc.collect()
+            last_gc_ms = time.ticks_ms()
 
 
 def run_target_mode(YOLO11, VisionPipeline, locate_target_center):
