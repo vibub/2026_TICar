@@ -91,9 +91,9 @@ static int test_target_lock_survives_conflicting_digit(void)
     input.digit_fresh = 1U;
     input.digit.valid = 1U;
     input.digit.digit = 6U;
+    /* CONSENSUS 本身就是药房多帧锁定结果，旧 K230 不带 LOCKED 位也必须兼容。 */
     input.digit.flags = K230_DIGIT_FLAG_VALID |
-                        K230_DIGIT_FLAG_CONSENSUS |
-                        K230_DIGIT_FLAG_LOCKED;
+                        K230_DIGIT_FLAG_CONSENSUS;
     DeliveryTask_Update(&task, &input);
     CHECK(task.state == DELIVERY_STATE_TARGET_LOCKED);
     CHECK(task.target_locked == 1U);
@@ -106,6 +106,12 @@ static int test_target_lock_survives_conflicting_digit(void)
     input.digit.digit = 3U;
     DeliveryTask_Update(&task, &input);
     CHECK(task.target_digit == 6U);
+
+    /* 与串口屏 0x10 相同的后端调用必须在共识锁存后直接进入 FOLLOW。 */
+    CHECK(DeliveryTask_StartRoute(&task) == 1U);
+    CHECK(task.state == DELIVERY_STATE_FOLLOW);
+    CHECK(s_sent_mode == K230_VISUAL_MODE_TARGET);
+    CHECK(s_sent_target == 6U);
     return 1;
 }
 

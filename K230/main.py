@@ -30,6 +30,9 @@ DIGIT_LABELS = ["1", "2", "3", "4", "5", "6", "7", "8"]
 DIGIT_CONFIDENCE_THRESHOLD = 0.60
 # 4 Hz 足以在 1200 ms 决策窗口内形成 3 帧共识，同时给红线循环留出余量。
 DIGIT_INFERENCE_INTERVAL_MS = 250
+# 药房目标静止不动，允许较慢 YOLO 帧在 2.5 s 内继续累计三帧共识。
+# 该窗口只用于出发前目标锁存，不放宽行驶中路口数字的实时决策窗口。
+DIGIT_PHARMACY_CONSENSUS_MAX_GAP_MS = 2500
 # AI 通道异常时禁止沿用 snapshot 默认 1000 ms 超时长期阻塞红线。
 DIGIT_CAPTURE_TIMEOUT_MS = 60
 DIGIT_DEBUG_INTERVAL_RUNS = 10
@@ -459,7 +462,11 @@ def run_delivery_mode(
     )
     pipeline.create()
     red_line_detector = RedLineDetector()
-    pharmacy_consensus = DigitConsensus(history_size=5, required_votes=3)
+    pharmacy_consensus = DigitConsensus(
+        history_size=5,
+        required_votes=3,
+        max_gap_ms=DIGIT_PHARMACY_CONSENSUS_MAX_GAP_MS,
+    )
     route_consensus = DigitConsensus(history_size=5, required_votes=3)
     command = VisualCommand(constants["VISUAL_MODE_OFF"], 0, 0, 0)
 

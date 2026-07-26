@@ -91,6 +91,20 @@ class DigitLogicTest(unittest.TestCase):
         )
         self.assertEqual(status["locked_digit"], 6)
 
+    def test_pharmacy_consensus_tolerates_slow_inference(self):
+        consensus = DigitConsensus(
+            history_size=5,
+            required_votes=3,
+            max_gap_ms=2500,
+        )
+        for now_ms in (0, 900, 1800):
+            status = consensus.observe(
+                DigitDetection(4, 260, 60, 70, 70, SIDE_CENTER, 0.90),
+                now_ms,
+            )
+        self.assertTrue(status["confirmed"])
+        self.assertEqual(status["locked_digit"], 4)
+
     def test_epoch_reset_allows_new_target(self):
         consensus = DigitConsensus(required_votes=1)
         consensus.set_epoch(1)

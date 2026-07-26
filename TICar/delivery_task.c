@@ -142,11 +142,11 @@ static void DeliveryTask_UpdateTargetLock(
         (input->digit_fresh == 0U) ||
         (input->digit.valid == 0U) ||
         ((input->digit.flags & K230_DIGIT_FLAG_CONSENSUS) == 0U) ||
-        ((input->digit.flags & K230_DIGIT_FLAG_LOCKED) == 0U) ||
         (input->digit.digit < 1U) || (input->digit.digit > 8U)) {
         return;
     }
 
+    /* 药房模式下 CONSENSUS 已代表多帧锁定，不再依赖冗余的 LOCKED 兼容位。 */
     task->target_digit = input->digit.digit;
     task->target_locked = 1U;
     task->state = DELIVERY_STATE_TARGET_LOCKED;
