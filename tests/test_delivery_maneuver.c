@@ -223,11 +223,13 @@ static int test_imu_wait_and_recovery(void)
     return 1;
 }
 
-static int test_approach_uses_heading_when_line_disappears(void)
+static int test_approach_uses_heading_with_or_without_line(void)
 {
     DeliveryManeuver maneuver;
     DeliveryManeuver_Input input = default_input();
     DeliveryManeuver_Output output;
+    float left_with_line;
+    float right_with_line;
 
     DeliveryManeuver_Init(&maneuver);
     CHECK(DeliveryManeuver_Start(
@@ -235,19 +237,28 @@ static int test_approach_uses_heading_when_line_disappears(void)
     update_at(&maneuver, &input, &output, 300U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER);
 
-    input.line_fresh = 0U;
-    input.line_valid = 0U;
-    input.line_new = 0U;
+    /* 红线持续有效时也必须使用固定速度航向保持，不能套用路口巡线降速。 */
     input.heading_deg = -5.0f;
     update_at(&maneuver, &input, &output, 320U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER);
     CHECK(output.command == DELIVERY_MANEUVER_COMMAND_WHEEL_SPEED);
     CHECK(output.left_target_cm_s < output.right_target_cm_s);
     CHECK(output.left_target_cm_s > 0.0f);
+    left_with_line = output.left_target_cm_s;
+    right_with_line = output.right_target_cm_s;
+
+    /* 红线丢失后保持同一套前进控制，不能因为视觉状态改变行驶速度。 */
+    input.line_fresh = 0U;
+    input.line_valid = 0U;
+    input.line_new = 0U;
+    update_at(&maneuver, &input, &output, 340U);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_WHEEL_SPEED);
+    CHECK(output.left_target_cm_s == left_with_line);
+    CHECK(output.right_target_cm_s == right_with_line);
 
     input.left_position_cm = 20.2f;
     input.right_position_cm = 20.2f;
-    update_at(&maneuver, &input, &output, 340U);
+    update_at(&maneuver, &input, &output, 360U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_TURN);
     return 1;
 }
@@ -396,7 +407,7 @@ int main(void)
         !test_relative_heading_targets_wrap() ||
         !test_turn_uses_average_wheel_travel_limit() ||
         !test_imu_wait_and_recovery() ||
-        !test_approach_uses_heading_when_line_disappears() ||
+        !test_approach_uses_heading_with_or_without_line() ||
         !test_approach_without_line_or_imu_times_out() ||
         !test_reacquire_falls_through_without_line() ||
         !test_cross_completion_fallbacks() ||

@@ -2464,17 +2464,7 @@ uint8_t App_DeliveryStartIdentification(void)
     K230_DigitFrame stale_frame;
     uint8_t request_result;
 
-    /*
-     * 屏幕可能因按键抖动或重发再次送来 IDENTIFY。送药任务一旦启动，
-     * 重复命令只返回已受理，不能停车、递增 epoch 或重置正在执行的路口动作。
-     * 需要重新识别时必须先显式发送 DELIVERY_RESET。
-     */
-    if ((g_delivery_start_pending != 0U) ||
-        (g_delivery_task.state != DELIVERY_STATE_IDLE) ||
-        (DeliveryManeuver_IsActive(&g_delivery_maneuver) != 0U)) {
-        return 1U;
-    }
-
+    /* 每一条合法 IDENTIFY 命令都代表重新开始任务，并用新 epoch 重置 K230 共识。 */
     if ((g_app_current_mode == APP_MODE_LINE_FOLLOW) &&
         (g_speed_pid_initialized != 0U)) {
         Bsp_Motor_SpeedPidStop();

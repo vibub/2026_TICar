@@ -312,14 +312,19 @@ void DeliveryManeuver_Update(
                     DELIVERY_MANEUVER_FAULT_STATE_TIMEOUT);
                 break;
             }
-            if (Maneuver_LineUsable(input) != 0U) {
-                Maneuver_SetOutputFollow(output);
-            } else if (input->imu_fresh != 0U) {
+            /*
+             * 该阶段只负责直达旋转中心。优先使用固定 10 cm/s 的 IMU 航向保持，
+             * 避免持续看到路口横线时套用普通巡线的多重降速和内侧轮反转。
+             * IMU 暂时不可用时才退回红线巡线，保证仍有可恢复的前进路径。
+             */
+            if (input->imu_fresh != 0U) {
                 Maneuver_SetHeadingHoldForward(
                     maneuver->approach_heading_deg,
                     MANEUVER_APPROACH_BLIND_SPEED_CM_S,
                     input,
                     output);
+            } else if (Maneuver_LineUsable(input) != 0U) {
+                Maneuver_SetOutputFollow(output);
             }
             break;
 
