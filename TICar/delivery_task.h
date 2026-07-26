@@ -23,6 +23,7 @@ typedef struct {
     uint8_t line_valid;
     uint8_t junction_active;
     uint8_t direction_mask;
+    uint8_t junction_alignment_ready; /* 底盘是否已锁存校正后的道路航向。 */
     uint8_t digit_new;
     uint8_t digit_fresh;
     K230_DigitFrame digit;
@@ -37,12 +38,13 @@ typedef struct {
     uint8_t junction_id;
     uint8_t previous_junction_active;
     uint8_t line_waiting; /* K230 红线链路中断后停车等待恢复，不锁存永久故障。 */
-    /* 进入 DECIDE 时锁存当前路口方向，避免停车等待 YOLO 期间方向位被清除。 */
-    uint8_t junction_direction_mask;
+    uint8_t junction_direction_mask; /* 当前路口累计的可行方向证据。 */
+    uint8_t target_consensus_seen; /* 对正期间是否已确认目标数字身份。 */
+    uint8_t post_alignment_digit_pending; /* 对正后是否仍在等待新的目标 D 帧。 */
     uint8_t visual_mode;
     uint8_t visual_command_pending;
     uint32_t last_visual_command_ms;
-    uint32_t decision_start_ms; /* 进入 DECIDE 的时间，用于等待 YOLO 完成共识窗口。 */
+    uint32_t post_alignment_start_ms; /* 对正后数字方位采样窗口起点。 */
     RoutePlanner_Decision pending_decision;
     RoutePlanner planner;
 } DeliveryTask;

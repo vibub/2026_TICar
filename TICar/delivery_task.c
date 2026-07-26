@@ -10,8 +10,8 @@
 
 #define DELIVERY_VISUAL_RESEND_MS 500U
 #define DELIVERY_JUNCTION_ID_FIRST 1U
-/* 至少等待一轮 YOLO 共识窗口，禁止首个未确认 D 帧直接锁存 FRONT。 */
-#define DELIVERY_DECIDE_WAIT_MS 1200U
+/* 对正后等待一轮目标方位采样；对正前不消耗该窗口。 */
+#define DELIVERY_POST_ALIGNMENT_WAIT_MS 1200U
 
 static uint8_t DeliveryTask_NextRegion(
     const DeliveryTask *task,
@@ -73,6 +73,45 @@ static void DeliveryTask_RefreshVisualCommand(DeliveryTask *task)
     }
 }
 
+static uint8_t DeliveryTask_IsTargetDigitFrame(
+    const DeliveryTask *task,
+    const DeliveryTask_Input *input)
+{
+    return ((input->digit_new != 0U) &&
+            (input->digit_fresh != 0U) &&
+            (input->digit.valid != 0U) &&
+            (input->digit.digit == task->target_digit) &&
+            ((input->digit.flags & K230_DIGIT_FLAG_TARGET_MATCH) != 0U)) ?
+           1U : 0U;
+}
+
+static uint8_t DeliveryTask_IsTargetConsensusFrame(
+    const DeliveryTask *task,
+    const DeliveryTask_Input *input)
+{
+    return ((DeliveryTask_IsTargetDigitFrame(task, input) != 0U) &&
+            ((input->digit.flags & K230_DIGIT_FLAG_CONSENSUS) != 0U)) ?
+           1U : 0U;
+}
+
+static void DeliveryTask_FinishDecision(
+    DeliveryTask *task,
+    RoutePlanner_Decision decision)
+{
+    if ((decision == ROUTE_DECISION_LEFT) ||
+        (decision == ROUTE_DECISION_RIGHT) ||
+        (decision == ROUTE_DECISION_FRONT)) {
+        task->pending_decision = decision;
+        task->post_alignment_digit_pending = 0U;
+        task->state = DELIVERY_STATE_HOLD;
+        /* 路口动作期间暂停 YOLO，避免推理阻塞 L 帧和转向控制。 */
+        (void) DeliveryTask_SendVisualCommand(task, K230_VISUAL_MODE_OFF);
+    } else if (decision == ROUTE_DECISION_FAULT) {
+        task->pending_decision = decision;
+        task->state = DELIVERY_STATE_FAULT;
+    }
+}
+
 void DeliveryTask_Init(DeliveryTask *task)
 {
     if (task == NULL) {
@@ -105,6 +144,12 @@ uint8_t DeliveryTask_StartRoute(DeliveryTask *task)
     }
     task->state = DELIVERY_STATE_FOLLOW;
     task->route_region = K230_ROUTE_REGION_NEAR;
+    task->previous_junction_active = 0U;
+    task->junction_direction_mask = 0U;
+    task->target_consensus_seen = 0U;
+    task->post_alignment_digit_pending = 0U;
+    task->post_alignment_start_ms = 0U;
+    task->pending_decision = ROUTE_DECISION_NONE;
     (void) RoutePlanner_SetRegion(&task->planner, task->route_region);
     (void) DeliveryTask_SendVisualCommand(task, K230_VISUAL_MODE_TARGET);
     return 1U;
@@ -157,10 +202,11 @@ static void DeliveryTask_UpdateTargetLock(
 void DeliveryTask_Update(DeliveryTask *task, const DeliveryTask_Input *input)
 {
     RoutePlanner_Observation observation = {0};
-    RoutePlanner_Decision decision;
+    RoutePlanner_Decision decision = ROUTE_DECISION_HOLD;
     uint32_t now_ms;
     uint8_t new_junction;
-    uint8_t target_consensus_ready;
+    uint8_t target_frame_ready;
+    uint8_t fixed_near_decision;
 
     if ((task == NULL) || (input == NULL) ||
         (task->state == DELIVERY_STATE_IDLE) ||
@@ -174,91 +220,133 @@ void DeliveryTask_Update(DeliveryTask *task, const DeliveryTask_Input *input)
     if (task->state == DELIVERY_STATE_TARGET_LOCKED) {
         return;
     }
-    if (task->state != DELIVERY_STATE_FOLLOW &&
-        task->state != DELIVERY_STATE_DECIDE) {
+    if ((task->state != DELIVERY_STATE_FOLLOW) &&
+        (task->state != DELIVERY_STATE_DECIDE)) {
         return;
     }
 
     now_ms = Bsp_Time_GetMilliseconds();
-    if (input->line_fresh == 0U) {
-        /*
-         * 红线链路中断时只停车等待，不把可恢复的通信抖动锁存成永久故障。
-         * DECIDE 的等待窗口同步暂停，避免恢复后立即按“未发现目标”直行。
-         */
-        task->line_waiting = 1U;
-        if (task->state == DELIVERY_STATE_DECIDE) {
-            task->decision_start_ms = now_ms;
-        }
-        return;
-    }
-    task->line_waiting = 0U;
 
-    new_junction = (input->junction_active != 0U) &&
-                   (task->previous_junction_active == 0U);
-    task->previous_junction_active = input->junction_active;
+    /* 只有 FOLLOW 可以创建新路口；DECIDE 中的重复边沿只补充当前方向证据。 */
+    new_junction = 0U;
+    if (input->line_fresh != 0U) {
+        new_junction = ((task->state == DELIVERY_STATE_FOLLOW) &&
+                        (input->junction_active != 0U) &&
+                        (task->previous_junction_active == 0U)) ? 1U : 0U;
+        task->previous_junction_active = input->junction_active;
+    }
+
     if (new_junction != 0U) {
         task->junction_id++;
         if (task->junction_id == ROUTE_PLANNER_NO_JUNCTION) {
             task->junction_id = DELIVERY_JUNCTION_ID_FIRST;
         }
-        /*
-         * 小车在 DECIDE 中会停车等待 YOLO 达成共识，时间可能超过应用层
-         * 300 ms 的路口清除保持时间，因此方向证据必须由任务状态机独立保存。
-         */
         task->junction_direction_mask = input->direction_mask;
-        task->decision_start_ms = now_ms;
+        task->target_consensus_seen = 0U;
+        task->post_alignment_digit_pending = 0U;
+        task->post_alignment_start_ms = 0U;
+        task->pending_decision = ROUTE_DECISION_NONE;
         task->state = DELIVERY_STATE_DECIDE;
         (void) DeliveryTask_SendVisualCommand(task, K230_VISUAL_MODE_TARGET);
     } else if ((task->state == DELIVERY_STATE_DECIDE) &&
+               (input->line_fresh != 0U) &&
                (input->direction_mask != 0U)) {
-        /* 等待数字期间继续合并新方向证据，但不能丢失最初看到的左右支路。 */
         task->junction_direction_mask |= input->direction_mask;
     }
 
+    if (task->state == DELIVERY_STATE_FOLLOW) {
+        task->line_waiting = (input->line_fresh == 0U) ? 1U : 0U;
+        return;
+    }
     if (task->state != DELIVERY_STATE_DECIDE) {
         return;
     }
 
-    target_consensus_ready =
-        ((input->digit_new != 0U) &&
-         (input->digit_fresh != 0U) &&
-         (input->digit.valid != 0U) &&
-         (input->digit.digit == task->target_digit) &&
-         ((input->digit.flags & K230_DIGIT_FLAG_TARGET_MATCH) != 0U) &&
-         ((input->digit.flags & K230_DIGIT_FLAG_CONSENSUS) != 0U)) ? 1U : 0U;
+    /* 红线暂失也不能丢弃已经到达的目标身份共识，但此时禁止使用 side。 */
+    if (DeliveryTask_IsTargetConsensusFrame(task, input) != 0U) {
+        task->target_consensus_seen = 1U;
+    }
 
-    /*
-     * 目标尚未形成共识时先保持 DECIDE，避免第一个无效或未确认 D 帧
-     * 立即被规划为 FRONT。等待完整共识窗口后才允许按“未发现目标”处理。
-     */
-    if ((target_consensus_ready == 0U) &&
-        ((uint32_t) (now_ms - task->decision_start_ms) <
-         DELIVERY_DECIDE_WAIT_MS)) {
+    if ((input->junction_alignment_ready != 0U) &&
+        (task->post_alignment_digit_pending == 0U)) {
+        task->post_alignment_digit_pending = 1U;
+        task->post_alignment_start_ms = now_ms;
+    }
+
+    if (input->line_fresh == 0U) {
+        task->line_waiting = 1U;
+        if (task->post_alignment_digit_pending != 0U) {
+            task->post_alignment_start_ms = now_ms;
+        }
+        return;
+    }
+    if ((task->line_waiting != 0U) &&
+        (task->post_alignment_digit_pending != 0U)) {
+        /* 链路恢复后从当前时刻重新给满方位采样窗口。 */
+        task->post_alignment_start_ms = now_ms;
+    }
+    task->line_waiting = 0U;
+
+    if (input->junction_alignment_ready == 0U) {
         return;
     }
 
-    if (input->digit_new != 0U) {
-        observation.digit_valid = input->digit.valid;
+    observation.direction_mask = task->junction_direction_mask;
+    fixed_near_decision =
+        ((task->route_region == K230_ROUTE_REGION_NEAR) &&
+         ((task->target_digit == 1U) ||
+          (task->target_digit == 2U))) ? 1U : 0U;
+
+    /* 近端 1/2 号方向固定，对正完成后无需额外等待数字方位帧。 */
+    if (fixed_near_decision != 0U) {
+        decision = RoutePlanner_Decide(
+            &task->planner,
+            task->junction_id,
+            &observation);
+        DeliveryTask_FinishDecision(task, decision);
+        if (task->state != DELIVERY_STATE_DECIDE) {
+            return;
+        }
+    }
+
+    target_frame_ready =
+        ((DeliveryTask_IsTargetDigitFrame(task, input) != 0U) &&
+         ((task->target_consensus_seen != 0U) ||
+          ((input->digit.flags & K230_DIGIT_FLAG_CONSENSUS) != 0U))) ?
+        1U : 0U;
+
+    if (target_frame_ready != 0U) {
+        observation.digit_valid = 1U;
         observation.digit = input->digit.digit;
         observation.side = input->digit.side;
-        observation.digit_flags = input->digit.flags;
+        observation.digit_flags = input->digit.flags |
+                                  K230_DIGIT_FLAG_CONSENSUS;
+        decision = RoutePlanner_Decide(
+            &task->planner,
+            task->junction_id,
+            &observation);
+        DeliveryTask_FinishDecision(task, decision);
+        if (task->state != DELIVERY_STATE_DECIDE) {
+            return;
+        }
+        /* 方向证据暂缺时保留该路口并重新给下一帧完整等待窗口。 */
+        task->post_alignment_start_ms = now_ms;
+        return;
     }
-    observation.direction_mask = task->junction_direction_mask;
+
+    if ((uint32_t) (now_ms - task->post_alignment_start_ms) <
+        DELIVERY_POST_ALIGNMENT_WAIT_MS) {
+        return;
+    }
+
+    /* 无目标超时仍由 RoutePlanner 按当前区域决定，远端返回 HOLD 时继续识别。 */
     decision = RoutePlanner_Decide(
         &task->planner,
         task->junction_id,
         &observation);
-
-    if ((decision == ROUTE_DECISION_LEFT) ||
-        (decision == ROUTE_DECISION_RIGHT) ||
-        (decision == ROUTE_DECISION_FRONT)) {
-        task->pending_decision = decision;
-        task->state = DELIVERY_STATE_HOLD;
-        /* 路口动作期间只保留红线通道，暂停 YOLO，避免推理阻塞 L 帧和转向控制。 */
-        (void) DeliveryTask_SendVisualCommand(task, K230_VISUAL_MODE_OFF);
-    } else if (decision == ROUTE_DECISION_FAULT) {
-        task->pending_decision = decision;
-        task->state = DELIVERY_STATE_FAULT;
+    DeliveryTask_FinishDecision(task, decision);
+    if (task->state == DELIVERY_STATE_DECIDE) {
+        task->post_alignment_start_ms = now_ms;
     }
 }
 
@@ -285,7 +373,9 @@ uint8_t DeliveryTask_CommitPendingDecision(DeliveryTask *task)
     RoutePlanner_ClearJunction(&task->planner, task->junction_id);
     task->previous_junction_active = 1U;
     task->junction_direction_mask = 0U;
-    task->decision_start_ms = 0U;
+    task->target_consensus_seen = 0U;
+    task->post_alignment_digit_pending = 0U;
+    task->post_alignment_start_ms = 0U;
     task->pending_decision = ROUTE_DECISION_NONE;
     task->state = DELIVERY_STATE_FOLLOW;
     (void) DeliveryTask_SendVisualCommand(task, K230_VISUAL_MODE_TARGET);
@@ -306,7 +396,7 @@ uint8_t DeliveryTask_IsMotionAllowed(const DeliveryTask *task)
     if (task == NULL) {
         return 0U;
     }
-    /* 路口决策或红线链路恢复期间均保持停车，禁止沿用上一次电机输出。 */
+    /* 普通巡线只在 FOLLOW 中授权；DECIDE 的运动由 Maneuver ALIGN 独占控制。 */
     return ((task->state == DELIVERY_STATE_FOLLOW) &&
             (task->line_waiting == 0U)) ? 1U : 0U;
 }

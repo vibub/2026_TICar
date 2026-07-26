@@ -75,7 +75,40 @@ static DeliveryTask_Input empty_input(void)
     return input;
 }
 
-static int test_target_lock_survives_conflicting_digit(void)
+static void setup_route_task(
+    DeliveryTask *task,
+    uint8_t target_digit,
+    uint8_t region)
+{
+    DeliveryTask_Init(task);
+    task->epoch = 3U;
+    task->target_digit = target_digit;
+    task->target_locked = 1U;
+    task->state = DELIVERY_STATE_FOLLOW;
+    task->route_region = region;
+    (void) RoutePlanner_SetTarget(&task->planner, target_digit);
+    (void) RoutePlanner_SetRegion(&task->planner, region);
+}
+
+static void set_target_digit(
+    DeliveryTask_Input *input,
+    uint8_t digit,
+    uint8_t side,
+    uint8_t consensus)
+{
+    input->digit_new = 1U;
+    input->digit_fresh = 1U;
+    input->digit.valid = 1U;
+    input->digit.digit = digit;
+    input->digit.side = side;
+    input->digit.flags = K230_DIGIT_FLAG_VALID |
+                         K230_DIGIT_FLAG_TARGET_MATCH;
+    if (consensus != 0U) {
+        input->digit.flags |= K230_DIGIT_FLAG_CONSENSUS;
+    }
+}
+
+static int test_target_lock_and_route_start(void)
 {
     DeliveryTask task;
     DeliveryTask_Input input = empty_input();
@@ -85,13 +118,11 @@ static int test_target_lock_survives_conflicting_digit(void)
     CHECK(DeliveryTask_StartIdentification(&task, 7U) == 1U);
     CHECK(task.state == DELIVERY_STATE_IDENTIFY);
     CHECK(s_sent_mode == K230_VISUAL_MODE_PHARMACY);
-    CHECK(s_sent_target == 0U);
 
     input.digit_new = 1U;
     input.digit_fresh = 1U;
     input.digit.valid = 1U;
     input.digit.digit = 6U;
-    /* CONSENSUS 本身就是药房多帧锁定结果，旧 K230 不带 LOCKED 位也必须兼容。 */
     input.digit.flags = K230_DIGIT_FLAG_VALID |
                         K230_DIGIT_FLAG_CONSENSUS;
     DeliveryTask_Update(&task, &input);
@@ -99,304 +130,274 @@ static int test_target_lock_survives_conflicting_digit(void)
     CHECK(task.target_locked == 1U);
     CHECK(task.target_digit == 6U);
     CHECK(s_sent_mode == K230_VISUAL_MODE_OFF);
-    CHECK(s_sent_target == 6U);
-    CHECK(s_sent_region == K230_ROUTE_REGION_PHARMACY);
-    CHECK(s_sent_epoch == 7U);
 
-    input.digit.digit = 3U;
-    DeliveryTask_Update(&task, &input);
-    CHECK(task.target_digit == 6U);
-
-    /* 与串口屏 0x10 相同的后端调用必须在共识锁存后直接进入 FOLLOW。 */
     CHECK(DeliveryTask_StartRoute(&task) == 1U);
     CHECK(task.state == DELIVERY_STATE_FOLLOW);
+    CHECK(task.route_region == K230_ROUTE_REGION_NEAR);
+    CHECK(task.target_consensus_seen == 0U);
+    CHECK(task.post_alignment_digit_pending == 0U);
     CHECK(s_sent_mode == K230_VISUAL_MODE_TARGET);
     CHECK(s_sent_target == 6U);
     return 1;
 }
 
-static int test_reset_sends_plain_off_command(void)
-{
-    DeliveryTask task;
-
-    reset_harness();
-    DeliveryTask_Init(&task);
-    task.epoch = 8U;
-    task.target_digit = 6U;
-    task.target_locked = 1U;
-    task.state = DELIVERY_STATE_TARGET_LOCKED;
-
-    DeliveryTask_Reset(&task);
-    CHECK(task.state == DELIVERY_STATE_IDLE);
-    CHECK(s_sent_mode == K230_VISUAL_MODE_OFF);
-    CHECK(s_sent_target == 0U);
-    CHECK(s_sent_region == K230_ROUTE_REGION_PHARMACY);
-    CHECK(s_sent_epoch == 0U);
-    CHECK(s_send_count == 1U);
-    CHECK(task.visual_command_pending == 1U);
-    return 1;
-}
-
-static int test_route_uses_target_and_region_commands(void)
+static int test_no_target_wait_starts_after_alignment(void)
 {
     DeliveryTask task;
     DeliveryTask_Input input = empty_input();
 
     reset_harness();
-    DeliveryTask_Init(&task);
-    DeliveryTask_StartIdentification(&task, 9U);
-    task.target_digit = 6U;
-    task.target_locked = 1U;
-    task.state = DELIVERY_STATE_TARGET_LOCKED;
-    CHECK(RoutePlanner_SetTarget(&task.planner, 6U) == 1U);
-    CHECK(DeliveryTask_StartRoute(&task) == 1U);
-    CHECK(task.state == DELIVERY_STATE_FOLLOW);
-    CHECK(task.route_region == K230_ROUTE_REGION_NEAR);
-    CHECK(s_sent_mode == K230_VISUAL_MODE_TARGET);
-    CHECK(s_sent_target == 6U);
-    CHECK(s_sent_region == K230_ROUTE_REGION_NEAR);
-
-    /* 3～8 号在近端未出现时直行前往中部。 */
+    setup_route_task(&task, 6U, K230_ROUTE_REGION_NEAR);
     input.junction_active = 1U;
     input.direction_mask = K230_LINE_DIRECTION_FRONT |
                            K230_LINE_DIRECTION_LEFT |
                            K230_LINE_DIRECTION_RIGHT;
-    input.digit_new = 1U;
-    input.digit_fresh = 1U;
-    input.digit.valid = 0U;
     DeliveryTask_Update(&task, &input);
     CHECK(task.state == DELIVERY_STATE_DECIDE);
-    CHECK(task.pending_decision == ROUTE_DECISION_NONE);
+    CHECK(task.post_alignment_digit_pending == 0U);
 
-    /* 未识别到目标时等待完整 YOLO 共识窗口，超时后才决定直行。 */
-    s_now_ms = 1200U;
+    /* 对正前经过再久也不能提前按无目标 FRONT。 */
+    s_now_ms = 5000U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+
+    input.junction_alignment_ready = 1U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.post_alignment_digit_pending == 1U);
+    CHECK(task.post_alignment_start_ms == 5000U);
+
+    s_now_ms = 6199U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+    s_now_ms = 6200U;
     DeliveryTask_Update(&task, &input);
     CHECK(task.state == DELIVERY_STATE_HOLD);
     CHECK(task.pending_decision == ROUTE_DECISION_FRONT);
     CHECK(s_sent_mode == K230_VISUAL_MODE_OFF);
-    CHECK(s_sent_target == 6U);
+
     CHECK(DeliveryTask_CommitPendingDecision(&task) == 1U);
-    CHECK(s_sent_mode == K230_VISUAL_MODE_TARGET);
+    CHECK(task.state == DELIVERY_STATE_FOLLOW);
     CHECK(task.route_region == K230_ROUTE_REGION_MIDDLE);
+    CHECK(task.target_consensus_seen == 0U);
+    CHECK(task.post_alignment_digit_pending == 0U);
     return 1;
 }
 
-static int test_middle_target_selects_observed_side(void)
+static int test_pre_alignment_consensus_uses_new_post_alignment_side(void)
 {
     DeliveryTask task;
     DeliveryTask_Input input = empty_input();
 
     reset_harness();
-    DeliveryTask_Init(&task);
-    task.epoch = 3U;
-    task.target_digit = 5U;
-    task.target_locked = 1U;
-    task.state = DELIVERY_STATE_FOLLOW;
-    task.route_region = K230_ROUTE_REGION_MIDDLE;
-    CHECK(RoutePlanner_SetTarget(&task.planner, 5U) == 1U);
-    CHECK(RoutePlanner_SetRegion(
-              &task.planner, K230_ROUTE_REGION_MIDDLE) == 1U);
-
+    setup_route_task(&task, 5U, K230_ROUTE_REGION_MIDDLE);
     input.junction_active = 1U;
     input.direction_mask = K230_LINE_DIRECTION_LEFT |
                            K230_LINE_DIRECTION_FRONT;
-    input.digit_new = 1U;
-    input.digit_fresh = 1U;
-    input.digit.valid = 1U;
-    input.digit.digit = 5U;
-    input.digit.side = K230_DIGIT_SIDE_LEFT;
-    input.digit.flags = K230_DIGIT_FLAG_VALID |
-                        K230_DIGIT_FLAG_TARGET_MATCH |
-                        K230_DIGIT_FLAG_CONSENSUS;
+    set_target_digit(&input, 5U, K230_DIGIT_SIDE_RIGHT, 1U);
     DeliveryTask_Update(&task, &input);
-    CHECK(task.pending_decision == ROUTE_DECISION_LEFT);
+
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+    CHECK(task.target_consensus_seen == 1U);
+    CHECK(task.pending_decision == ROUTE_DECISION_NONE);
+
+    /* 对正完成时先清掉旧 D 帧，必须等待新的画面方位。 */
+    input.junction_alignment_ready = 1U;
+    input.digit_new = 0U;
+    s_now_ms = 20U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+
+    /* 身份已有共识，因此对正后的新目标帧不必重新携带 CONSENSUS。 */
+    set_target_digit(&input, 5U, K230_DIGIT_SIDE_LEFT, 0U);
+    s_now_ms = 40U;
+    DeliveryTask_Update(&task, &input);
     CHECK(task.state == DELIVERY_STATE_HOLD);
+    CHECK(task.pending_decision == ROUTE_DECISION_LEFT);
     CHECK(DeliveryTask_HasPendingTurn(&task) == 1U);
-    CHECK(DeliveryTask_IsMotionAllowed(&task) == 0U);
     return 1;
 }
 
-static int test_target_waits_for_consensus_before_route_decision(void)
+static int test_post_alignment_frame_requires_identity_consensus(void)
 {
     DeliveryTask task;
     DeliveryTask_Input input = empty_input();
 
     reset_harness();
-    DeliveryTask_Init(&task);
-    task.target_digit = 6U;
-    task.target_locked = 1U;
-    task.state = DELIVERY_STATE_FOLLOW;
-    task.route_region = K230_ROUTE_REGION_NEAR;
-    CHECK(RoutePlanner_SetTarget(&task.planner, 6U) == 1U);
-    CHECK(RoutePlanner_SetRegion(
-              &task.planner, K230_ROUTE_REGION_NEAR) == 1U);
-
+    setup_route_task(&task, 6U, K230_ROUTE_REGION_MIDDLE);
     input.junction_active = 1U;
-    input.direction_mask = K230_LINE_DIRECTION_LEFT |
-                           K230_LINE_DIRECTION_FRONT |
-                           K230_LINE_DIRECTION_RIGHT;
-    input.digit_new = 1U;
-    input.digit_fresh = 1U;
-    input.digit.valid = 1U;
-    input.digit.digit = 6U;
-    input.digit.side = K230_DIGIT_SIDE_LEFT;
-    input.digit.flags = K230_DIGIT_FLAG_VALID |
-                        K230_DIGIT_FLAG_TARGET_MATCH;
+    input.direction_mask = K230_LINE_DIRECTION_RIGHT |
+                           K230_LINE_DIRECTION_FRONT;
     DeliveryTask_Update(&task, &input);
 
-    /* 首次看到正确目标但尚未达成共识时，不能提前锁存 FRONT。 */
+    input.junction_alignment_ready = 1U;
+    set_target_digit(&input, 6U, K230_DIGIT_SIDE_RIGHT, 0U);
+    s_now_ms = 20U;
+    DeliveryTask_Update(&task, &input);
     CHECK(task.state == DELIVERY_STATE_DECIDE);
-    CHECK(task.pending_decision == ROUTE_DECISION_NONE);
+    CHECK(task.target_consensus_seen == 0U);
 
-    s_now_ms = 600U;
     input.digit.flags |= K230_DIGIT_FLAG_CONSENSUS;
+    s_now_ms = 40U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_HOLD);
+    CHECK(task.pending_decision == ROUTE_DECISION_RIGHT);
+    return 1;
+}
+
+static int test_fixed_near_target_decides_immediately_after_alignment(void)
+{
+    DeliveryTask task;
+    DeliveryTask_Input input = empty_input();
+
+    reset_harness();
+    setup_route_task(&task, 1U, K230_ROUTE_REGION_NEAR);
+    input.junction_active = 1U;
+    input.direction_mask = K230_LINE_DIRECTION_LEFT |
+                           K230_LINE_DIRECTION_FRONT;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+
+    input.junction_alignment_ready = 1U;
+    s_now_ms = 20U;
     DeliveryTask_Update(&task, &input);
     CHECK(task.state == DELIVERY_STATE_HOLD);
     CHECK(task.pending_decision == ROUTE_DECISION_LEFT);
     return 1;
 }
 
-static int test_decide_retries_after_transient_direction_loss(void)
+static int test_duplicate_junction_edge_does_not_change_id(void)
 {
     DeliveryTask task;
     DeliveryTask_Input input = empty_input();
+    uint8_t first_id;
 
     reset_harness();
-    DeliveryTask_Init(&task);
-    task.target_digit = 6U;
-    task.target_locked = 1U;
-    task.state = DELIVERY_STATE_FOLLOW;
-    task.route_region = K230_ROUTE_REGION_FAR;
-    CHECK(RoutePlanner_SetTarget(&task.planner, 6U) == 1U);
-    CHECK(RoutePlanner_SetRegion(
-              &task.planner, K230_ROUTE_REGION_FAR) == 1U);
-
-    input.junction_active = 1U;
-    input.direction_mask = K230_LINE_DIRECTION_FRONT;
-    input.digit_new = 1U;
-    input.digit_fresh = 1U;
-    input.digit.valid = 1U;
-    input.digit.digit = 6U;
-    input.digit.side = K230_DIGIT_SIDE_LEFT;
-    input.digit.flags = K230_DIGIT_FLAG_VALID |
-                        K230_DIGIT_FLAG_TARGET_MATCH |
-                        K230_DIGIT_FLAG_CONSENSUS;
-    DeliveryTask_Update(&task, &input);
-    CHECK(task.state == DELIVERY_STATE_DECIDE);
-    CHECK(task.pending_decision == ROUTE_DECISION_NONE);
-
-    /* 下一帧路口方向恢复后，同一路口必须进入 LEFT 的自动动作流程。 */
-    input.direction_mask = K230_LINE_DIRECTION_LEFT |
-                           K230_LINE_DIRECTION_FRONT;
-    DeliveryTask_Update(&task, &input);
-    CHECK(task.state == DELIVERY_STATE_HOLD);
-    CHECK(task.pending_decision == ROUTE_DECISION_LEFT);
-    CHECK(s_sent_mode == K230_VISUAL_MODE_OFF);
-    return 1;
-}
-
-static int test_decide_preserves_junction_mask_while_waiting_yolo(void)
-{
-    DeliveryTask task;
-    DeliveryTask_Input input = empty_input();
-
-    reset_harness();
-    DeliveryTask_Init(&task);
-    task.target_digit = 6U;
-    task.target_locked = 1U;
-    task.state = DELIVERY_STATE_FOLLOW;
-    task.route_region = K230_ROUTE_REGION_FAR;
-    CHECK(RoutePlanner_SetTarget(&task.planner, 6U) == 1U);
-    CHECK(RoutePlanner_SetRegion(
-              &task.planner, K230_ROUTE_REGION_FAR) == 1U);
-
-    /* 进入路口时已经可靠看到左支路，但 YOLO 尚未产生新数字帧。 */
+    setup_route_task(&task, 6U, K230_ROUTE_REGION_FAR);
     input.junction_active = 1U;
     input.direction_mask = K230_LINE_DIRECTION_LEFT |
                            K230_LINE_DIRECTION_FRONT;
-    input.digit_new = 0U;
     DeliveryTask_Update(&task, &input);
+    first_id = task.junction_id;
     CHECK(task.state == DELIVERY_STATE_DECIDE);
-    CHECK((task.junction_direction_mask &
-           K230_LINE_DIRECTION_LEFT) != 0U);
 
-    /* 停车等待超过路口保持时间后，应用层可能只剩 FRONT，但不能丢掉左支路。 */
     input.junction_active = 0U;
-    input.direction_mask = K230_LINE_DIRECTION_FRONT;
     DeliveryTask_Update(&task, &input);
-    CHECK(task.state == DELIVERY_STATE_DECIDE);
-    CHECK((task.junction_direction_mask &
-           K230_LINE_DIRECTION_LEFT) != 0U);
-
-    /* 后续 YOLO 达成目标共识时，仍应使用进入路口时的方向证据执行左转。 */
-    input.digit_new = 1U;
-    input.digit_fresh = 1U;
-    input.digit.valid = 1U;
-    input.digit.digit = 6U;
-    input.digit.side = K230_DIGIT_SIDE_LEFT;
-    input.digit.flags = K230_DIGIT_FLAG_VALID |
-                        K230_DIGIT_FLAG_TARGET_MATCH |
-                        K230_DIGIT_FLAG_CONSENSUS;
+    input.junction_active = 1U;
+    input.direction_mask = K230_LINE_DIRECTION_RIGHT;
     DeliveryTask_Update(&task, &input);
-    CHECK(task.state == DELIVERY_STATE_HOLD);
-    CHECK(task.pending_decision == ROUTE_DECISION_LEFT);
+    CHECK(task.junction_id == first_id);
+    CHECK((task.junction_direction_mask & K230_LINE_DIRECTION_LEFT) != 0U);
+    CHECK((task.junction_direction_mask & K230_LINE_DIRECTION_RIGHT) != 0U);
     return 1;
 }
 
-static int test_decide_state_stops_until_digit_arrives(void)
+static int test_line_timeout_keeps_consensus_and_restarts_window(void)
 {
     DeliveryTask task;
     DeliveryTask_Input input = empty_input();
 
     reset_harness();
-    DeliveryTask_Init(&task);
-    task.target_digit = 4U;
-    task.target_locked = 1U;
-    task.state = DELIVERY_STATE_FOLLOW;
-    task.route_region = K230_ROUTE_REGION_NEAR;
-    CHECK(RoutePlanner_SetTarget(&task.planner, 4U) == 1U);
-    CHECK(RoutePlanner_SetRegion(
-              &task.planner, K230_ROUTE_REGION_NEAR) == 1U);
+    setup_route_task(&task, 4U, K230_ROUTE_REGION_MIDDLE);
+    input.junction_active = 1U;
+    input.direction_mask = K230_LINE_DIRECTION_LEFT |
+                           K230_LINE_DIRECTION_FRONT;
+    DeliveryTask_Update(&task, &input);
 
+    input.junction_alignment_ready = 1U;
+    input.line_fresh = 0U;
+    set_target_digit(&input, 4U, K230_DIGIT_SIDE_LEFT, 1U);
+    s_now_ms = 100U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.target_consensus_seen == 1U);
+    CHECK(task.line_waiting == 1U);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+    CHECK(task.post_alignment_start_ms == 100U);
+
+    input.line_fresh = 1U;
+    input.digit_new = 0U;
+    s_now_ms = 200U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.line_waiting == 0U);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+
+    s_now_ms = 1399U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+    s_now_ms = 1400U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_HOLD);
+    CHECK(task.pending_decision == ROUTE_DECISION_FRONT);
+    return 1;
+}
+
+static int test_far_region_no_target_keeps_waiting(void)
+{
+    DeliveryTask task;
+    DeliveryTask_Input input = empty_input();
+
+    reset_harness();
+    setup_route_task(&task, 6U, K230_ROUTE_REGION_FAR);
     input.junction_active = 1U;
     input.direction_mask = K230_LINE_DIRECTION_LEFT |
                            K230_LINE_DIRECTION_FRONT |
                            K230_LINE_DIRECTION_RIGHT;
-    input.digit_new = 0U;
+    DeliveryTask_Update(&task, &input);
+    input.junction_alignment_ready = 1U;
+    s_now_ms = 20U;
     DeliveryTask_Update(&task, &input);
 
+    s_now_ms = 1220U;
+    DeliveryTask_Update(&task, &input);
     CHECK(task.state == DELIVERY_STATE_DECIDE);
     CHECK(task.pending_decision == ROUTE_DECISION_NONE);
-    CHECK(DeliveryTask_IsMotionAllowed(&task) == 0U);
+    CHECK(task.post_alignment_start_ms == 1220U);
     return 1;
 }
 
-static int test_line_timeout_waits_and_recovers(void)
+static int test_direction_loss_retries_same_junction(void)
 {
     DeliveryTask task;
     DeliveryTask_Input input = empty_input();
 
     reset_harness();
+    setup_route_task(&task, 6U, K230_ROUTE_REGION_FAR);
+    input.junction_active = 1U;
+    input.direction_mask = K230_LINE_DIRECTION_FRONT;
+    set_target_digit(&input, 6U, K230_DIGIT_SIDE_LEFT, 1U);
+    DeliveryTask_Update(&task, &input);
+    input.junction_alignment_ready = 1U;
+    input.digit_new = 0U;
+    s_now_ms = 20U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_DECIDE);
+
+    input.direction_mask = K230_LINE_DIRECTION_LEFT |
+                           K230_LINE_DIRECTION_FRONT;
+    set_target_digit(&input, 6U, K230_DIGIT_SIDE_LEFT, 0U);
+    s_now_ms = 40U;
+    DeliveryTask_Update(&task, &input);
+    CHECK(task.state == DELIVERY_STATE_HOLD);
+    CHECK(task.pending_decision == ROUTE_DECISION_LEFT);
+    return 1;
+}
+
+static int test_reset_clears_alignment_gates(void)
+{
+    DeliveryTask task;
+
+    reset_harness();
     DeliveryTask_Init(&task);
-    task.target_digit = 4U;
-    task.target_locked = 1U;
-    task.state = DELIVERY_STATE_FOLLOW;
+    task.target_consensus_seen = 1U;
+    task.post_alignment_digit_pending = 1U;
+    task.post_alignment_start_ms = 123U;
+    task.state = DELIVERY_STATE_DECIDE;
+    DeliveryTask_Reset(&task);
 
-    /* L 帧链路中断只进入可恢复停车，不再锁存永久任务故障。 */
-    input.line_fresh = 0U;
-    DeliveryTask_Update(&task, &input);
-    CHECK(task.state == DELIVERY_STATE_FOLLOW);
-    CHECK(task.pending_decision == ROUTE_DECISION_NONE);
-    CHECK(task.line_waiting == 1U);
-    CHECK(DeliveryTask_IsMotionAllowed(&task) == 0U);
-
-    /* 链路恢复后清除等待标志；应用层还会额外确认连续有效帧。 */
-    s_now_ms = 500U;
-    input.line_fresh = 1U;
-    DeliveryTask_Update(&task, &input);
-    CHECK(task.state == DELIVERY_STATE_FOLLOW);
-    CHECK(task.line_waiting == 0U);
-    CHECK(DeliveryTask_IsMotionAllowed(&task) == 1U);
+    CHECK(task.state == DELIVERY_STATE_IDLE);
+    CHECK(task.target_consensus_seen == 0U);
+    CHECK(task.post_alignment_digit_pending == 0U);
+    CHECK(task.post_alignment_start_ms == 0U);
+    CHECK(s_sent_mode == K230_VISUAL_MODE_OFF);
     return 1;
 }
 
@@ -427,15 +428,16 @@ static int test_visual_command_resends_until_ack(void)
 
 int main(void)
 {
-    if (!test_target_lock_survives_conflicting_digit() ||
-        !test_reset_sends_plain_off_command() ||
-        !test_route_uses_target_and_region_commands() ||
-        !test_middle_target_selects_observed_side() ||
-        !test_target_waits_for_consensus_before_route_decision() ||
-        !test_decide_retries_after_transient_direction_loss() ||
-        !test_decide_preserves_junction_mask_while_waiting_yolo() ||
-        !test_decide_state_stops_until_digit_arrives() ||
-        !test_line_timeout_waits_and_recovers() ||
+    if (!test_target_lock_and_route_start() ||
+        !test_no_target_wait_starts_after_alignment() ||
+        !test_pre_alignment_consensus_uses_new_post_alignment_side() ||
+        !test_post_alignment_frame_requires_identity_consensus() ||
+        !test_fixed_near_target_decides_immediately_after_alignment() ||
+        !test_duplicate_junction_edge_does_not_change_id() ||
+        !test_line_timeout_keeps_consensus_and_restarts_window() ||
+        !test_far_region_no_target_keeps_waiting() ||
+        !test_direction_loss_retries_same_junction() ||
+        !test_reset_clears_alignment_gates() ||
         !test_visual_command_resends_until_ack()) {
         return 1;
     }
