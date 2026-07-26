@@ -36,6 +36,16 @@ uint8_t Bsp_Uart_K230_TryReceiveByte(uint8_t *byte)
     return 1U;
 }
 
+void Bsp_Uart_K230_FlushRx(void)
+{
+    s_rx_index = s_rx_length;
+}
+
+uint32_t Bsp_Uart_K230_GetOverflowCount(void)
+{
+    return 0U;
+}
+
 uint32_t Bsp_Uart_K230_GetErrorStatus(void)
 {
     return 0U;

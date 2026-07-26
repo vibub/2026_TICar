@@ -25,6 +25,7 @@ static uint8_t g_k230_new_digit_frame;
 volatile uint32_t g_k230_valid_frame_count;
 volatile uint32_t g_k230_invalid_frame_count;
 volatile uint32_t g_k230_rx_byte_count;
+volatile uint32_t g_k230_rx_overflow_count;
 volatile uint8_t g_k230_link_alive;
 volatile uint8_t g_k230_target_valid;
 volatile uint32_t g_k230_last_frame_ms;
@@ -50,6 +51,7 @@ volatile uint32_t g_k230_visual_ack_count;
 
 void Protocol_K230_Init(void)
 {
+    Bsp_Uart_K230_FlushRx();
     g_k230_line_length = 0U;
     g_k230_discard_until_lf = 0U;
     g_k230_new_frame = 0U;
@@ -59,6 +61,7 @@ void Protocol_K230_Init(void)
     g_k230_valid_frame_count = 0U;
     g_k230_invalid_frame_count = 0U;
     g_k230_rx_byte_count = 0U;
+    g_k230_rx_overflow_count = 0U;
     g_k230_link_alive = 0U;
     g_k230_target_valid = 0U;
     g_k230_last_frame_ms = 0U;
@@ -354,11 +357,21 @@ void Protocol_K230_Task(void)
 {
     uint8_t byte;
     uint32_t error_status;
+    uint32_t overflow_count;
     uint32_t now_ms;
 
+    overflow_count = Bsp_Uart_K230_GetOverflowCount();
+    if (overflow_count != g_k230_rx_overflow_count) {
+        g_k230_rx_overflow_count = overflow_count;
+        Bsp_Uart_K230_FlushRx();
+        g_k230_line_length = 0U;
+        g_k230_discard_until_lf = 0U;
+        g_k230_invalid_frame_count++;
+    }
     error_status = Bsp_Uart_K230_GetErrorStatus();
     if (error_status != 0U) {
         Bsp_Uart_K230_ClearErrorStatus(error_status);
+        Bsp_Uart_K230_FlushRx();
         g_k230_line_length = 0U;
         g_k230_discard_until_lf = 0U;
         g_k230_invalid_frame_count++;

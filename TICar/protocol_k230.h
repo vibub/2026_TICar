@@ -78,6 +78,7 @@ extern volatile K230_TargetFrame g_k230_latest_frame;
 extern volatile uint32_t g_k230_valid_frame_count;
 extern volatile uint32_t g_k230_invalid_frame_count;
 extern volatile uint32_t g_k230_rx_byte_count;
+extern volatile uint32_t g_k230_rx_overflow_count;
 extern volatile uint8_t g_k230_link_alive;
 extern volatile uint8_t g_k230_target_valid;
 extern volatile uint32_t g_k230_last_frame_ms;
