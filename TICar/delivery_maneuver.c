@@ -10,7 +10,7 @@
 #include <string.h>
 
 #define MANEUVER_BRAKE_MS 300U /* 路口动作开始和结束时的制动等待时间，单位 ms。 */
-#define MANEUVER_APPROACH_CENTER_CM 20.0f /* 识别路口后继续前进到旋转中心的距离，单位 cm。 */
+#define MANEUVER_APPROACH_CENTER_CM 30.0f /* 识别路口后继续前进到旋转中心的距离，单位 cm。 */
 #define MANEUVER_APPROACH_TIMEOUT_MS 6000U /* 进入路口中心阶段的最长允许时间，单位 ms。 */
 #define MANEUVER_APPROACH_BLIND_SPEED_CM_S 10.0f /* 路口内看不到红线时航向保持前进的基础轮速，单位 cm/s。 */
 #define MANEUVER_HEADING_HOLD_KP 0.30f /* 丢线前进时航向误差到轮速差修正的比例系数。 */

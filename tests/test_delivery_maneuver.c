@@ -50,8 +50,8 @@ static int enter_turn_rotate(
     update_at(maneuver, input, output, 300U);
     CHECK(maneuver->state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER);
 
-    input->left_position_cm = 20.2f;
-    input->right_position_cm = 20.2f;
+    input->left_position_cm = 30.2f;
+    input->right_position_cm = 30.2f;
     update_at(maneuver, input, output, 320U);
     CHECK(maneuver->state == DELIVERY_MANEUVER_STATE_TURN);
     CHECK(maneuver->turn_phase == DELIVERY_MANEUVER_TURN_SETTLE);
@@ -188,8 +188,8 @@ static int test_imu_wait_and_recovery(void)
     CHECK(DeliveryManeuver_Start(
               &maneuver, ROUTE_DECISION_LEFT, &input) == 1U);
     update_at(&maneuver, &input, &output, 300U);
-    input.left_position_cm = 20.2f;
-    input.right_position_cm = 20.2f;
+    input.left_position_cm = 30.2f;
+    input.right_position_cm = 30.2f;
     update_at(&maneuver, &input, &output, 320U);
 
     /* SETTLE 到期但 IMU 不新鲜时保持停车，不启动旋转超时。 */
@@ -256,8 +256,8 @@ static int test_approach_uses_heading_with_or_without_line(void)
     CHECK(output.left_target_cm_s == left_with_line);
     CHECK(output.right_target_cm_s == right_with_line);
 
-    input.left_position_cm = 20.2f;
-    input.right_position_cm = 20.2f;
+    input.left_position_cm = 30.2f;
+    input.right_position_cm = 30.2f;
     update_at(&maneuver, &input, &output, 360U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_TURN);
     return 1;
@@ -360,8 +360,8 @@ static int test_front_crosses_with_heading_fallback(void)
     CHECK(DeliveryManeuver_Start(
               &maneuver, ROUTE_DECISION_FRONT, &input) == 1U);
     update_at(&maneuver, &input, &output, 300U);
-    input.left_position_cm = 20.2f;
-    input.right_position_cm = 20.2f;
+    input.left_position_cm = 30.2f;
+    input.right_position_cm = 30.2f;
     update_at(&maneuver, &input, &output, 320U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_CROSS);
     CHECK(maneuver.target_heading_deg == 32.0f);
