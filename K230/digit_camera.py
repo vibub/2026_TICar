@@ -1,12 +1,13 @@
-"""使用自训练 YOLO11 模型进行数字 1-8 的摄像头实时检测。"""
+"""使用比赛主视觉管线对数字 1～8 进行摄像头实时检测。"""
 
 import gc
 import os
 import sys
 import time
 
-from libs.PipeLine import PipeLine
 from libs.YOLO import YOLO11
+from digit_logic import make_detections
+from vision_pipeline import VisionPipeline
 
 
 KMODEL_PATH = "/sdcard/models/yolo11n_det_320.kmodel"
@@ -14,23 +15,24 @@ LABELS = ["1", "2", "3", "4", "5", "6", "7", "8"]
 MODEL_INPUT_SIZE = [320, 320]
 
 RGB888P_SIZE = [640, 360]
-DISPLAY_SIZE = [640, 480]
+DISPLAY_SIZE = [800, 480]
 CONFIDENCE_THRESHOLD = 0.60
 NMS_THRESHOLD = 0.45
 
 
 def run_digit_detector():
+    """独立验证数字模型、检测框和新车体左右方位。"""
     pipeline = None
     detector = None
 
     os.exitpoint(os.EXITPOINT_ENABLE)
 
     try:
-        print("初始化 IDE 摄像头显示...")
-        pipeline = PipeLine(
-            rgb888p_size=RGB888P_SIZE,
-            display_mode="virt",
-            display_size=DISPLAY_SIZE,
+        print("初始化比赛摄像头管线...")
+        pipeline = VisionPipeline(
+            cv_size=(320, 240),
+            ai_size=tuple(RGB888P_SIZE),
+            display_size=tuple(DISPLAY_SIZE),
         )
         pipeline.create()
 
@@ -42,7 +44,7 @@ def run_digit_detector():
             labels=LABELS,
             rgb888p_size=RGB888P_SIZE,
             model_input_size=MODEL_INPUT_SIZE,
-            display_size=pipeline.get_display_size(),
+            display_size=list(pipeline.display_size),
             conf_thresh=CONFIDENCE_THRESHOLD,
             nms_thresh=NMS_THRESHOLD,
             max_boxes_num=50,
@@ -58,19 +60,38 @@ def run_digit_detector():
             os.exitpoint()
             clock.tick()
 
-            frame = pipeline.get_frame()
-            result = detector.run(frame)
+            ai_frame, ai_array = pipeline.capture_ai_frame()
+            result = detector.run(ai_array)
+            detections = make_detections(
+                result,
+                LABELS,
+                CONFIDENCE_THRESHOLD,
+            )
+
+            pipeline.clear_osd()
             detector.draw_result(result, pipeline.osd_img)
-            pipeline.show_image()
+            pipeline.show_osd()
 
-            frame = None
-            result = None
             frame_count += 1
-
             if frame_count >= 30:
-                print("FPS: %.2f" % clock.fps())
+                if detections:
+                    best = detections[0]
+                    print(
+                        "DIGIT",
+                        "number=", best.digit,
+                        "box=", (best.x, best.y, best.width, best.height),
+                        "side=", best.side,
+                        "confidence=", int(best.confidence * 100),
+                        "fps=", clock.fps(),
+                    )
+                else:
+                    print("DIGIT none, fps=", clock.fps())
                 frame_count = 0
                 gc.collect()
+
+            ai_frame = None
+            ai_array = None
+            result = None
 
     except KeyboardInterrupt:
         print("用户停止数字检测。")
@@ -82,7 +103,7 @@ def run_digit_detector():
             try:
                 detector.deinit()
             except BaseException as error:
-                print("YOLO 清理异常:")
+                print("YOLO清理异常:")
                 sys.print_exception(error)
 
         if pipeline is not None:

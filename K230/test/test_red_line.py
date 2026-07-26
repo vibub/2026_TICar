@@ -14,6 +14,9 @@ from red_line import (  # noqa: E402
     DIRECTION_FRONT,
     DIRECTION_LEFT,
     DIRECTION_RIGHT,
+    JUNCTION_FORWARD_HALF_WIDTH,
+    JUNCTION_FORWARD_HEIGHT,
+    JUNCTION_FORWARD_MIN_REACH_PX,
     JUNCTION_SEARCH_ROI,
     RedLineDetector,
     TRACK_ROIS,
@@ -78,8 +81,26 @@ def make_fake_image(junction_blob=None, forward_blob=None):
 
     responses[JUNCTION_SEARCH_ROI] = [] if junction_blob is None else [junction_blob]
     if junction_blob is not None:
-        top = junction_blob.cy() - 54
-        responses[(138, top, 44, 54)] = [] if forward_blob is None else [forward_blob]
+        center_x = junction_blob.cx()
+        top = junction_blob.cy() - JUNCTION_FORWARD_HEIGHT
+        left = center_x - JUNCTION_FORWARD_HALF_WIDTH
+        width = JUNCTION_FORWARD_HALF_WIDTH * 2
+
+        # 真实前向 ROI 会裁入横线自身的上半部分，旧逻辑会因此把 T 字误判为十字。
+        pollution_height = max(4, JUNCTION_FORWARD_MIN_REACH_PX // 3)
+        pollution = FakeBlob(
+            (
+                left,
+                junction_blob.cy() - pollution_height,
+                width,
+                pollution_height,
+            ),
+            pixels=width * pollution_height,
+        )
+        forward_responses = [pollution]
+        if forward_blob is not None:
+            forward_responses.append(forward_blob)
+        responses[(left, top, width, JUNCTION_FORWARD_HEIGHT)] = forward_responses
     return FakeImage(responses)
 
 
@@ -184,7 +205,8 @@ class RedLineMathTest(unittest.TestCase):
         self.assertTrue(straight.valid)
         self.assertEqual(straight.direction_mask, DIRECTION_FRONT)
 
-        junction = FakeBlob((40, 100, 240, 10), pixels=260, center=(160, 105))
+        # 使用较厚横线并让前向 ROI 包含横线污染，复现实车 T 字误判 M7。
+        junction = FakeBlob((40, 96, 240, 18), pixels=420, center=(160, 105))
         t_result = detector.detect(make_fake_image(junction_blob=junction))
         self.assertTrue(t_result.valid)
         self.assertEqual(t_result.direction_mask, DIRECTION_LEFT | DIRECTION_RIGHT)
@@ -198,6 +220,24 @@ class RedLineMathTest(unittest.TestCase):
             cross_result.direction_mask,
             DIRECTION_LEFT | DIRECTION_FRONT | DIRECTION_RIGHT,
         )
+
+    def test_isolated_invalid_frames_hold_last_reliable_line(self):
+        detector = RedLineDetector()
+        reliable = detector.detect(make_fake_image())
+        self.assertTrue(reliable.valid)
+
+        # 相同场景中偶发一两个 ROI 全部未成 blob 时，短时保持上次可靠控制量。
+        first_miss = detector.detect(FakeImage({}))
+        second_miss = detector.detect(FakeImage({}))
+        third_miss = detector.detect(FakeImage({}))
+
+        self.assertTrue(first_miss.valid)
+        self.assertTrue(second_miss.valid)
+        self.assertEqual(first_miss.error_x, reliable.error_x)
+        self.assertEqual(second_miss.direction_mask, reliable.direction_mask)
+        self.assertLess(first_miss.quality, reliable.quality)
+        self.assertLessEqual(second_miss.quality, first_miss.quality)
+        self.assertFalse(third_miss.valid)
 
     def test_fit_matches_known_slope(self):
         points = [

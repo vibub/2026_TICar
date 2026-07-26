@@ -13,7 +13,7 @@ IMAGE_CENTER_X = 160
 CONTROL_Y = 204
 
 # LAB 起始阈值仅供首次上板使用，必须按实际胶带、相机和赛场光照重新标定。
-RED_THRESHOLDS = [(20, 100, 25, 127, 5, 127)]
+RED_THRESHOLDS = [(20, 100, 10, 127, 5, 127)]
 
 # ROI 按由近到远的顺序排列。近场权重更高，避免远处路口横线主导转向。
 TRACK_ROIS = (
@@ -36,6 +36,10 @@ MIN_VALID_QUALITY = 45
 MAX_ABS_ANGLE_DEG = 70.0
 EXPECTED_PIXELS_PER_ROI = 90.0
 
+# 单帧曝光或阈值抖动时短暂沿用最近可靠结果；最多 2 帧，避免长期掩盖真实丢线。
+INVALID_HOLD_FRAMES = 2
+INVALID_HOLD_QUALITY_DROP = 8
+
 # 路口横向分支至少延伸到中心线两侧该距离，才视为真实方向。
 JUNCTION_SEARCH_ROI = (0, 54, 320, 112)
 JUNCTION_MIN_PIXELS = 35
@@ -45,6 +49,8 @@ JUNCTION_CENTER_GATE_PX = 24
 JUNCTION_FORWARD_HALF_WIDTH = 22
 JUNCTION_FORWARD_HEIGHT = 54
 JUNCTION_FORWARD_MIN_PIXELS = 18
+# 前向红线必须明显越过横线向画面上方延伸，避免把 T 字横线自身判成前方。
+JUNCTION_FORWARD_MIN_REACH_PX = 24
 
 DIRECTION_LEFT = 0x01
 DIRECTION_FRONT = 0x02
@@ -90,10 +96,14 @@ class RedLineDetector:
         self.thresholds = RED_THRESHOLDS if thresholds is None else thresholds
         self.center_x = int(center_x)
         self.previous_x = int(center_x)
+        self.last_valid_result = None
+        self.invalid_hold_count = 0
 
     def reset(self):
-        """清除帧间预测，下一帧重新从标定中心搜索。"""
+        """清除帧间预测和短时保持，下一帧重新从标定中心搜索。"""
         self.previous_x = self.center_x
+        self.last_valid_result = None
+        self.invalid_hold_count = 0
 
     def detect(self, img):
         """识别一帧红线；图像尺寸不匹配时返回无效结果。"""
@@ -104,6 +114,30 @@ class RedLineDetector:
         analysis = analyze_track_points(points, self.center_x, CONTROL_Y)
 
         if not analysis.valid:
+            self.invalid_hold_count += 1
+            if (
+                self.last_valid_result is not None
+                and self.invalid_hold_count <= INVALID_HOLD_FRAMES
+            ):
+                # 自动曝光或某个 ROI 的 blob 临界抖动不应让控制量瞬间归零。
+                # 只短时复用几何结果并逐帧降低质量，连续失效后仍会正常报丢线。
+                held_quality = max(
+                    MIN_VALID_QUALITY,
+                    self.last_valid_result.quality
+                    - self.invalid_hold_count * INVALID_HOLD_QUALITY_DROP,
+                )
+                return LineResult(
+                    valid=True,
+                    error_x=self.last_valid_result.error_x,
+                    angle_d10=self.last_valid_result.angle_d10,
+                    quality=held_quality,
+                    # 保持帧只用于连续巡线，不重复确认上一帧的路口侧支证据。
+                    direction_mask=DIRECTION_FRONT,
+                    point_count=analysis.point_count,
+                    fit_rms=analysis.fit_rms,
+                )
+
+            self.last_valid_result = None
             return analysis
 
         slope, intercept, _ = fit_weighted_line(points)
@@ -116,6 +150,16 @@ class RedLineDetector:
             self.center_x + analysis.error_x,
             0,
             IMAGE_WIDTH - 1,
+        )
+        self.invalid_hold_count = 0
+        self.last_valid_result = LineResult(
+            valid=True,
+            error_x=analysis.error_x,
+            angle_d10=analysis.angle_d10,
+            quality=analysis.quality,
+            direction_mask=analysis.direction_mask,
+            point_count=analysis.point_count,
+            fit_rms=analysis.fit_rms,
         )
         return analysis
 
@@ -448,4 +492,10 @@ def _has_forward_line(img, thresholds, junction_y, center_x):
         area_threshold=JUNCTION_FORWARD_MIN_PIXELS,
         merge=True,
     )
-    return len(blobs) > 0
+
+    # 前向 ROI 会包含横线靠上的一部分，不能仅凭出现红色连通域就判定为十字。
+    minimum_top = int(junction_y) - JUNCTION_FORWARD_MIN_REACH_PX
+    for blob in blobs:
+        if int(blob.rect()[1]) <= minimum_top:
+            return True
+    return False
