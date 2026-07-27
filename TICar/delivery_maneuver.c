@@ -12,7 +12,7 @@
 #define MANEUVER_BRAKE_MS 300U /* 路口动作结束时的制动等待时间，单位 ms。 */
 #define MANEUVER_APPROACH_CENTER_CM 50.0f /* 从首次识别路口到旋转中心的总距离，单位 cm。 */
 #define MANEUVER_APPROACH_TIMEOUT_MS 6000U /* 进入路口中心阶段的最长允许时间，单位 ms。 */
-#define MANEUVER_APPROACH_BLIND_SPEED_CM_S 10.0f /* 路口内航向保持前进的基础轮速，单位 cm/s。 */
+#define MANEUVER_APPROACH_BLIND_SPEED_CM_S 8.0f /* 路口内航向保持前进的基础轮速，降低路口内推进速度。 */
 #define MANEUVER_HEADING_HOLD_KP 0.30f /* 航向误差到轮速差修正的比例系数。 */
 #define MANEUVER_HEADING_HOLD_LIMIT_CM_S 4.0f /* 航向保持单侧轮速修正上限，单位 cm/s。 */
 
@@ -22,8 +22,8 @@
 #define MANEUVER_ALIGN_ROTATE_TARGET_LIMIT_DEG 15.0f /* 单次原地对正目标变化上限。 */
 #define MANEUVER_ALIGN_ROTATE_FINISH_DEG 2.0f /* IMU 接近小角度目标后恢复低速居中。 */
 #define MANEUVER_ALIGN_ROTATE_SPEED_CM_S 14.0f /* 能克服静摩擦的原地对正轮速。 */
-#define MANEUVER_ALIGN_CREEP_SPEED_CM_S 8.0f /* 对正期间低速前进轮速。 */
-#define MANEUVER_ALIGN_VISUAL_FALLBACK_SPEED_CM_S 6.0f /* IMU 暂失时视觉低速前进轮速。 */
+#define MANEUVER_ALIGN_CREEP_SPEED_CM_S 5.0f /* 对正期间缓慢前进，避免慢 YOLO 时冲过路口。 */
+#define MANEUVER_ALIGN_VISUAL_FALLBACK_SPEED_CM_S 4.0f /* IMU 暂失时进一步降低视觉前进轮速。 */
 #define MANEUVER_ALIGN_VISUAL_FALLBACK_ERROR_KP 0.04f /* 视觉横向误差到轮速差比例。 */
 #define MANEUVER_ALIGN_VISUAL_FALLBACK_ANGLE_KP 0.10f /* 视觉角度误差到轮速差比例。 */
 #define MANEUVER_ALIGN_VISUAL_FALLBACK_LIMIT_CM_S 3.0f /* 视觉直控最大单侧差速。 */
@@ -37,7 +37,7 @@
 #define MANEUVER_ALIGN_STABLE_FRAMES 2U /* 对正完成所需连续新 L 帧数量。 */
 #define MANEUVER_ALIGN_SAFE_TIMEOUT_MS 2000U /* 有安全航向时的最佳努力对正时间。 */
 #define MANEUVER_ALIGN_HARD_TIMEOUT_MS 6000U /* 完全无安全航向时的停车等待上限。 */
-#define MANEUVER_ALIGN_WAIT_MAX_CM 12.0f /* 等待路线决策期间允许的最大总前进距离。 */
+#define MANEUVER_ALIGN_CREEP_MAX_CM 6.0f /* 对正阶段允许的最大总前进距离，达到后停车等待视觉。 */
 
 #define MANEUVER_TURN_SETTLE_MS 150U /* 正式转向前的车体稳定时间，单位 ms。 */
 #define MANEUVER_TURN_TIMEOUT_MS 8000U /* 实际原地旋转阶段的最长允许时间，单位 ms。 */
@@ -546,7 +546,7 @@ void DeliveryManeuver_Update(
             switch (maneuver->align_phase) {
                 case DELIVERY_MANEUVER_ALIGN_CREEP:
                     if (maneuver->junction_progress_cm >=
-                        MANEUVER_ALIGN_WAIT_MAX_CM) {
+                        MANEUVER_ALIGN_CREEP_MAX_CM) {
                         break;
                     }
                     if ((input->imu_fresh != 0U) &&
@@ -600,21 +600,11 @@ void DeliveryManeuver_Update(
                     break;
 
                 case DELIVERY_MANEUVER_ALIGN_READY:
-                    if (maneuver->junction_progress_cm >=
-                        MANEUVER_ALIGN_WAIT_MAX_CM) {
-                        break;
-                    }
-                    if (input->imu_fresh != 0U) {
-                        Maneuver_SetHeadingHoldForward(
-                            maneuver->approach_heading_deg,
-                            MANEUVER_ALIGN_CREEP_SPEED_CM_S,
-                            input,
-                            output);
-                    } else if (Maneuver_LineUsable(input) != 0U) {
-                        Maneuver_SetAlignVisualFallback(
-                            maneuver,
-                            output);
-                    }
+                    /*
+                     * 车头与红线中心对正后立即停车，等待对正画面中的新 D 帧。
+                     * 不能继续爬行，否则慢 YOLO 在 T 字路口尚未给出数字时，
+                     * 小车可能先驶离主红线并造成丢线。
+                     */
                     break;
 
                 default:

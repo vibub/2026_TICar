@@ -70,6 +70,7 @@ static int complete_alignment(
     CHECK(maneuver->align_phase == DELIVERY_MANEUVER_ALIGN_READY);
     CHECK(DeliveryManeuver_IsAlignmentReady(maneuver) == 1U);
     CHECK(float_near(maneuver->approach_heading_deg, heading_deg, 0.01f));
+    CHECK(output->command == DELIVERY_MANEUVER_COMMAND_STOP);
     return 1;
 }
 
@@ -176,10 +177,21 @@ static int test_lateral_error_creeps_without_in_place_rotation(void)
     CHECK(output.right_target_cm_s > 0.0f);
     first_target = maneuver.target_heading_deg;
 
-    /* 旧 L 帧只用于 IMU保持，不得再次改变视觉目标。 */
+    /* 旧 L 帧只用于 IMU 保持，不得再次改变视觉目标。 */
     input.line_new = 0U;
+    input.left_position_cm = 5.9f;
+    input.right_position_cm = 5.9f;
     update_at(&maneuver, &input, &output, 20U);
     CHECK(float_near(maneuver.target_heading_deg, first_target, 0.001f));
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_WHEEL_SPEED);
+    CHECK(float_near(output.left_target_cm_s + output.right_target_cm_s,
+                     10.0f, 0.01f));
+
+    /* 对正尚未稳定时也最多缓慢前进 6 cm，防止慢 YOLO 时驶离 T 字路口。 */
+    input.left_position_cm = 6.1f;
+    input.right_position_cm = 6.1f;
+    update_at(&maneuver, &input, &output, 40U);
+    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_STOP);
     return 1;
 }
 
@@ -243,7 +255,7 @@ static int test_decision_and_alignment_can_finish_in_either_order(void)
     return 1;
 }
 
-static int test_alignment_wait_distance_counts_toward_center(void)
+static int test_alignment_stops_while_waiting_and_counts_toward_center(void)
 {
     DeliveryManeuver maneuver;
     DeliveryManeuver_Input input = default_input();
@@ -251,28 +263,27 @@ static int test_alignment_wait_distance_counts_toward_center(void)
 
     CHECK(complete_alignment(&maneuver, &input, &output, 0.0f));
     input.line_new = 0U;
-    input.left_position_cm = 11.5f;
-    input.right_position_cm = 11.5f;
+    input.left_position_cm = 3.0f;
+    input.right_position_cm = 3.0f;
     update_at(&maneuver, &input, &output, 40U);
-    CHECK(output.command == DELIVERY_MANEUVER_COMMAND_WHEEL_SPEED);
 
-    input.left_position_cm = 12.1f;
-    input.right_position_cm = 12.1f;
-    update_at(&maneuver, &input, &output, 60U);
+    /* 对正完成后即使尚未达到爬行距离上限，也必须停车等待新 D 帧。 */
     CHECK(output.command == DELIVERY_MANEUVER_COMMAND_STOP);
+    CHECK(float_near(maneuver.junction_progress_cm, 3.0f, 0.01f));
 
     CHECK(DeliveryManeuver_SetDecision(
               &maneuver, ROUTE_DECISION_LEFT) == 1U);
-    update_at(&maneuver, &input, &output, 80U);
+    update_at(&maneuver, &input, &output, 60U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER);
 
-    input.left_position_cm = 49.8f;
-    input.right_position_cm = 49.8f;
-    update_at(&maneuver, &input, &output, 100U);
+    /* 对正期间已经走过的 3 cm 仍计入用户设置的 45 cm 路口中心距离。 */
+    input.left_position_cm = 44.8f;
+    input.right_position_cm = 44.8f;
+    update_at(&maneuver, &input, &output, 80U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_APPROACH_CENTER);
-    input.left_position_cm = 50.1f;
-    input.right_position_cm = 50.1f;
-    update_at(&maneuver, &input, &output, 120U);
+    input.left_position_cm = 45.1f;
+    input.right_position_cm = 45.1f;
+    update_at(&maneuver, &input, &output, 100U);
     CHECK(maneuver.state == DELIVERY_MANEUVER_STATE_TURN);
     return 1;
 }
@@ -491,7 +502,7 @@ int main(void)
         !test_lateral_error_creeps_without_in_place_rotation() ||
         !test_alignment_requires_fresh_imu_and_two_new_frames() ||
         !test_decision_and_alignment_can_finish_in_either_order() ||
-        !test_alignment_wait_distance_counts_toward_center() ||
+        !test_alignment_stops_while_waiting_and_counts_toward_center() ||
         !test_alignment_timeout_paths() ||
         !test_left_turn_full_path() ||
         !test_relative_heading_targets_wrap() ||
