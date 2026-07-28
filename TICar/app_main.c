@@ -27,6 +27,7 @@
 #include "protocol_tjc.h"
 
 #define APP_DEBUG_REQUEST_NONE 0xFFU
+#define APP_BT_TEST_TX_PERIOD_MS 100U
 
 /* 电机映射测试：用明显不同的左右轮比例观察底盘偏航方向。 */
 #define APP_MOTOR_TEST_SLOW_SPEED 0.18f // 电机映射测试中的低速轮比例参考。
@@ -321,6 +322,18 @@ volatile uint32_t g_app_mode_reject_count;
 volatile uint8_t g_app_debug_request_mode = APP_DEBUG_REQUEST_NONE;
 volatile uint8_t g_app_debug_request_result;
 volatile uint32_t g_app_debug_request_count;
+
+/* 蓝牙硬件联调邮箱：可在 CCS Watch 中改值，默认每 100 ms 发一帧。 */
+volatile BtPoseVelocity g_bt_test_tx = {
+    1111,
+    -2222,
+    9000,
+    500,
+    -300
+};
+volatile uint8_t g_bt_test_tx_enable = 1U;
+volatile uint32_t g_bt_test_tx_ok_count;
+static uint32_t g_bt_test_last_tx_ms;
 
 /* 切换内部状态：制动起始时间、应答中的原始请求，以及按需初始化标志。 */
 static uint32_t g_app_switch_deadline_ms;
@@ -2628,6 +2641,33 @@ static void App_DebugRequestTask(void)
     g_app_debug_request_result = App_RequestMode(requested_mode);
 }
 
+/*
+ * 临时蓝牙联调发送任务。先对 volatile Watch 邮箱做一致性快照，再交给协议层编码；
+ * 正式接入定位模块后应由真实位姿更新该邮箱，或删除此任务并直接调用发送接口。
+ */
+static void App_BluetoothTestTask(void)
+{
+    uint32_t now_ms = Bsp_Time_GetMilliseconds();
+    BtPoseVelocity snapshot;
+
+    if ((g_bt_test_tx_enable == 0U) ||
+        ((uint32_t) (now_ms - g_bt_test_last_tx_ms) <
+         APP_BT_TEST_TX_PERIOD_MS)) {
+        return;
+    }
+
+    g_bt_test_last_tx_ms = now_ms;
+    snapshot.x_mm = g_bt_test_tx.x_mm;
+    snapshot.y_mm = g_bt_test_tx.y_mm;
+    snapshot.yaw_cdeg = g_bt_test_tx.yaw_cdeg;
+    snapshot.linear_mm_s = g_bt_test_tx.linear_mm_s;
+    snapshot.angular_cdeg_s = g_bt_test_tx.angular_cdeg_s;
+
+    if (Protocol_Bt_SendPoseVelocity(&snapshot) != 0U) {
+        g_bt_test_tx_ok_count++;
+    }
+}
+
 uint8_t App_GetCurrentMode(void)
 {
     return g_app_current_mode;
@@ -2723,6 +2763,8 @@ void App_Init(void)
     Bsp_Imu_Init();
     Bsp_Time_Init();
     Protocol_Bt_Init();
+    g_bt_test_tx_ok_count = 0U;
+    g_bt_test_last_tx_ms = Bsp_Time_GetMilliseconds();
     Bsp_Motor_Init();
     Bsp_Motor_Disable();
     Bsp_Ptz_Disable();
@@ -2771,6 +2813,7 @@ void App_Loop(void)
     /* IMU 与 K230 始终接收，停止态也要排空 FIFO 并维护各自 freshness。 */
     Bsp_Imu_Task();
     Protocol_Bt_Task();
+    App_BluetoothTestTask();
     Protocol_K230_Task();
     App_DebugRequestTask();
     Protocol_Tjc_Task();
