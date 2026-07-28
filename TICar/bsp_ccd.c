@@ -16,7 +16,8 @@
 #define BSP_CCD_ADC_WAIT_TIMEOUT 10000U
 /* 最强正负边沿至少相隔 10 像素，才认为中间可能形成有效黑线区域。 */
 #define BSP_CCD_TARGET_MIN_EDGE_GAP 10U
-#define BSP_CCD_MIN_CONTRAST 80U
+/* 弱光下放宽整帧明暗差要求；低于 50 仍按无可靠黑线处理，避免噪声误触发。 */
+#define BSP_CCD_MIN_CONTRAST 50U
 /* 边沿总幅度较弱时，可暂时沿用最近可靠中心以保持控制连续性。 */
 #define BSP_CCD_WEAK_EDGE_DELTA 25
 #define BSP_CCD_MIN_BLACK_WIDTH 3U
