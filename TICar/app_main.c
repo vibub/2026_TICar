@@ -22,6 +22,7 @@
 #include "delivery_task.h"
 #include "line_heading_control.h"
 #include "pid.h"
+#include "protocol_bt.h"
 #include "protocol_k230.h"
 #include "protocol_tjc.h"
 
@@ -2721,6 +2722,7 @@ void App_Init(void)
     Bsp_Uart_Init();
     Bsp_Imu_Init();
     Bsp_Time_Init();
+    Protocol_Bt_Init();
     Bsp_Motor_Init();
     Bsp_Motor_Disable();
     Bsp_Ptz_Disable();
@@ -2768,6 +2770,7 @@ void App_Loop(void)
 {
     /* IMU 与 K230 始终接收，停止态也要排空 FIFO 并维护各自 freshness。 */
     Bsp_Imu_Task();
+    Protocol_Bt_Task();
     Protocol_K230_Task();
     App_DebugRequestTask();
     Protocol_Tjc_Task();

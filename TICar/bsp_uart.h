@@ -1,13 +1,13 @@
 /**
  * @file bsp_uart.h
- * @brief K230 和 TJC 两路 UART 的发送、接收及诊断接口。
+ * @brief K230、TJC 和双车蓝牙 UART 的发送、接收及诊断接口。
  */
 #ifndef BSP_UART_H
 #define BSP_UART_H
 
 #include <stdint.h>
 
-/** 初始化 K230/TJC 软件环形缓冲区，并使能两路 UART NVIC 中断。 */
+/** 初始化三路软件环形缓冲区，并使能 SysConfig 中已经配置的 UART NVIC 中断。 */
 void Bsp_Uart_Init(void);
 
 /* K230 UART：RX ISR 写入 128 字节软件缓冲，协议层通过 TryReceiveByte 消费。 */
@@ -35,5 +35,14 @@ uint8_t Bsp_Uart_Tjc_TryReceiveByte(uint8_t *byte);
 void Bsp_Uart_Tjc_FlushRx(void);
 uint32_t Bsp_Uart_Tjc_GetOverflowCount(void);
 uint32_t Bsp_Uart_Tjc_GetErrorCount(void);
+
+/* 蓝牙 UART：SysConfig 实例名必须为 UART_HC05；未配置时接口安全返回失败/无数据。 */
+uint8_t Bsp_Uart_Bluetooth_IsAvailable(void);
+uint8_t Bsp_Uart_Bluetooth_SendByte(uint8_t byte);
+uint8_t Bsp_Uart_Bluetooth_SendData(const uint8_t *data, uint16_t length);
+uint8_t Bsp_Uart_Bluetooth_TryReceiveByte(uint8_t *byte);
+void Bsp_Uart_Bluetooth_FlushRx(void);
+uint32_t Bsp_Uart_Bluetooth_GetOverflowCount(void);
+uint32_t Bsp_Uart_Bluetooth_GetErrorCount(void);
 
 #endif
