@@ -685,8 +685,12 @@ static float App_LineReferenceToCmS(float reference)
  */
 static void App_LineApplySpeedPid(float left_reference, float right_reference)
 {
-    Bsp_Motor_SetSpeedTargets(App_LineReferenceToCmS(left_reference),
-                              App_LineReferenceToCmS(right_reference));
+    const float speed_scale =
+        (float) Protocol_Tjc_GetSpeedPercent() * 0.01f;
+
+    Bsp_Motor_SetSpeedTargets(
+        App_LineReferenceToCmS(left_reference * speed_scale),
+        App_LineReferenceToCmS(right_reference * speed_scale));
     Bsp_Motor_SpeedPidUpdate();
     App_UpdateSpeedWatch();
 }

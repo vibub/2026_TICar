@@ -31,6 +31,7 @@ volatile uint32_t g_tjc_rx_overflow_count;
 volatile uint32_t g_tjc_rx_error_count;
 volatile uint8_t g_tjc_last_command;
 volatile uint8_t g_tjc_last_result;
+volatile uint8_t g_tjc_speed_percent;
 
 /* 丢弃当前半帧并回到第一个帧头字节的搜索状态。 */
 static void Protocol_Tjc_ResetRxParser(void)
@@ -57,6 +58,7 @@ void Protocol_Tjc_Init(void)
     g_tjc_rx_error_count = 0U;
     g_tjc_last_command = TJC_COMMAND_STOP;
     g_tjc_last_result = TJC_RESULT_STATE;
+    g_tjc_speed_percent = TJC_SPEED_PERCENT_DEFAULT;
     Protocol_Tjc_ResetRxParser();
     Bsp_Uart_Tjc_FlushRx();
 }
@@ -87,7 +89,13 @@ static void Protocol_Tjc_ProcessCommand(uint8_t command)
 {
     g_tjc_last_command = command;
 
-    if (command == TJC_COMMAND_QUERY) {
+    if ((command >= TJC_SPEED_PERCENT_MIN) &&
+        (command <= TJC_SPEED_PERCENT_MAX)) {
+        g_tjc_speed_percent = command;
+        g_tjc_valid_command_count++;
+        Protocol_Tjc_SendResult(
+            TJC_RESULT_SPEED_UPDATED, App_GetCurrentMode(), command);
+    } else if (command == TJC_COMMAND_QUERY) {
         g_tjc_valid_command_count++;
         Protocol_Tjc_SendResult(TJC_RESULT_STATE, App_GetCurrentMode(), command);
     } else if (command == TJC_COMMAND_DELIVERY_IDENTIFY) {
@@ -140,12 +148,9 @@ static void Protocol_Tjc_ConsumeByte(uint8_t byte)
             break;
 
         case TJC_RX_WAIT_COMMAND:
-            if (byte == TJC_REQUEST_HEADER_0) {
-                g_tjc_rx_state = TJC_RX_WAIT_HEADER_1;
-            } else {
-                g_tjc_rx_command = byte;
-                g_tjc_rx_state = TJC_RX_WAIT_CHECKSUM;
-            }
+            /* 0x5A 是合法的 90% 命令值，位于命令位时不能当作重同步帧头。 */
+            g_tjc_rx_command = byte;
+            g_tjc_rx_state = TJC_RX_WAIT_CHECKSUM;
             break;
 
         case TJC_RX_WAIT_CHECKSUM:
@@ -187,4 +192,9 @@ void Protocol_Tjc_Task(void)
         g_tjc_rx_byte_count++;
         Protocol_Tjc_ConsumeByte(byte);
     }
+}
+
+uint8_t Protocol_Tjc_GetSpeedPercent(void)
+{
+    return g_tjc_speed_percent;
 }
