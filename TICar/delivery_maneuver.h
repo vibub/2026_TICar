@@ -14,7 +14,7 @@
 
 typedef enum {
     DELIVERY_MANEUVER_STATE_IDLE = 0U,
-    DELIVERY_MANEUVER_STATE_BRAKE,
+    DELIVERY_MANEUVER_STATE_ALIGN,
     DELIVERY_MANEUVER_STATE_APPROACH_CENTER,
     DELIVERY_MANEUVER_STATE_TURN,
     DELIVERY_MANEUVER_STATE_REACQUIRE,
@@ -22,6 +22,13 @@ typedef enum {
     DELIVERY_MANEUVER_STATE_BRAKE_AFTER,
     DELIVERY_MANEUVER_STATE_FAULT
 } DeliveryManeuver_State;
+
+typedef enum {
+    DELIVERY_MANEUVER_ALIGN_CREEP = 0U,
+    DELIVERY_MANEUVER_ALIGN_SETTLE,
+    DELIVERY_MANEUVER_ALIGN_ROTATE,
+    DELIVERY_MANEUVER_ALIGN_READY
+} DeliveryManeuver_AlignPhase;
 
 typedef enum {
     DELIVERY_MANEUVER_TURN_SETTLE = 0U,
@@ -73,28 +80,52 @@ typedef struct {
 
 typedef struct {
     DeliveryManeuver_State state; /* 路口动作主状态。 */
+    DeliveryManeuver_AlignPhase align_phase; /* 路口对正内部阶段。 */
     DeliveryManeuver_TurnPhase turn_phase; /* 左右转内部阶段。 */
     RoutePlanner_Decision decision; /* 本次路口正在执行的路线决策。 */
     DeliveryManeuver_Fault fault; /* 当前锁存故障。 */
 
-    uint32_t state_start_ms; /* 当前状态或转向旋转阶段开始时间，单位 ms。 */
+    uint32_t state_start_ms; /* 当前主状态开始时间，单位 ms。 */
+    uint32_t align_phase_start_ms; /* 当前对正子阶段开始时间，单位 ms。 */
     float state_start_left_cm; /* 当前状态开始时左轮累计位置，单位 cm。 */
     float state_start_right_cm; /* 当前状态开始时右轮累计位置，单位 cm。 */
-    float target_heading_deg; /* 转向完成或丢线前进时保持的目标航向，单位 °。 */
-    float approach_heading_deg; /* 进入路口中心时保存的直行航向，单位 °。 */
+    float junction_start_left_cm; /* 首次检测路口时左轮位置，单位 cm。 */
+    float junction_start_right_cm; /* 首次检测路口时右轮位置，单位 cm。 */
+    float junction_progress_cm; /* 从首次检测路口起累计的有符号中心距离，单位 cm。 */
 
+    float target_heading_deg; /* 当前 IMU 闭环目标航向，单位 °。 */
+    float approach_heading_deg; /* 对正后保存的道路直行航向，单位 °。 */
+    float safe_heading_deg; /* 最近一次同时具备有效红线和 IMU 时得到的安全航向。 */
+    float filtered_line_error_px; /* ALIGN 使用的低通横向误差，单位 px。 */
+    float filtered_line_angle_deg; /* ALIGN 使用的低通红线角度，单位 °。 */
+    float align_visual_offset_deg; /* ALIGN 当前视觉目标航向偏移，单位 °。 */
+
+    uint8_t alignment_ready; /* 是否已经锁存可供后续动作使用的道路航向。 */
+    uint8_t decision_ready; /* 路线任务是否已经给出 FRONT/LEFT/RIGHT。 */
+    uint8_t align_filter_ready; /* ALIGN 视觉低通是否已有初值。 */
+    uint8_t safe_heading_valid; /* safe_heading_deg 是否可用。 */
+    uint8_t alignment_stable_count; /* 连续满足对正阈值的新 L 帧数量。 */
     uint8_t commit_requested; /* 是否已经向路线任务发出当前动作提交请求。 */
-    uint8_t heading_stable_count; /* 航向连续进入目标误差范围的控制周期数。 */
+    uint8_t heading_stable_count; /* 正式转向连续进入目标误差范围的周期数。 */
     int8_t reacquire_sweep_direction; /* 重捕获红线时当前原地扫描方向。 */
 } DeliveryManeuver;
 
 void DeliveryManeuver_Init(DeliveryManeuver *maneuver);
 void DeliveryManeuver_Reset(DeliveryManeuver *maneuver);
 
-uint8_t DeliveryManeuver_Start(
+/** 新路口出现时立即启动对正，不要求路线决策已经完成。 */
+uint8_t DeliveryManeuver_StartAlignment(
     DeliveryManeuver *maneuver,
-    RoutePlanner_Decision decision,
     const DeliveryManeuver_Input *input);
+
+/** 稍后锁存路线决策；重复设置相同决策幂等，冲突决策返回 0。 */
+uint8_t DeliveryManeuver_SetDecision(
+    DeliveryManeuver *maneuver,
+    RoutePlanner_Decision decision);
+
+/** 返回当前活跃路口动作是否已经完成道路航向对正。 */
+uint8_t DeliveryManeuver_IsAlignmentReady(
+    const DeliveryManeuver *maneuver);
 
 void DeliveryManeuver_Update(
     DeliveryManeuver *maneuver,

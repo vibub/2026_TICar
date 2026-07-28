@@ -86,6 +86,7 @@
 #define APP_LINE_CONTROL_MANEUVER_TURN 5U
 #define APP_LINE_CONTROL_MANEUVER_REACQUIRE 6U
 #define APP_LINE_CONTROL_IMU_BRIDGE 7U /* 红线暂时无效时由 IMU 低速保持当前直线路段航向。 */
+#define APP_LINE_CONTROL_MANEUVER_ALIGN 8U /* 路口数字识别期间的自适应车头对正状态。 */
 /* CCD 直行模式只做有效性门控，不使用中心误差进行转向。 */
 #define APP_CCD_STRAIGHT_SPEED 0.16f // 模式 8 检测到有效黑线时的固定直行比例参考。
 #define APP_IMU_HEADING_KP 0.0030f
@@ -484,14 +485,27 @@ volatile uint8_t g_delivery_junction_id;
 volatile uint8_t g_delivery_pending_decision;
 volatile uint8_t g_delivery_visual_mode;
 volatile uint8_t g_delivery_visual_command_pending;
+volatile uint8_t g_delivery_target_consensus_seen;
+volatile uint8_t g_delivery_post_alignment_digit_pending;
+volatile uint32_t g_delivery_post_alignment_start_ms;
 volatile uint8_t g_delivery_fault;
 
-/* 路口动作执行器 Watch：状态、故障和轮速目标用于实车标定 IMU 转角与重捕获过程。 */
+/* 路口动作执行器 Watch：对正、转向、总距离和轮速目标均可独立观察。 */
 static DeliveryManeuver g_delivery_maneuver;
 volatile uint8_t g_delivery_maneuver_state;
+volatile uint8_t g_delivery_maneuver_align_phase;
 volatile uint8_t g_delivery_maneuver_turn_phase;
+volatile uint8_t g_delivery_maneuver_alignment_ready;
+volatile uint8_t g_delivery_maneuver_decision_ready;
+volatile uint8_t g_delivery_maneuver_alignment_stable_count;
+volatile uint8_t g_delivery_maneuver_safe_heading_valid;
 volatile uint8_t g_delivery_maneuver_fault;
 volatile float g_delivery_maneuver_heading_target_deg;
+volatile float g_delivery_maneuver_approach_heading_deg;
+volatile float g_delivery_maneuver_junction_progress_cm;
+volatile float g_delivery_maneuver_filtered_line_error_px;
+volatile float g_delivery_maneuver_filtered_line_angle_deg;
+volatile float g_delivery_maneuver_visual_offset_deg;
 volatile float g_delivery_maneuver_left_target_cm_s;
 volatile float g_delivery_maneuver_right_target_cm_s;
 
@@ -1575,6 +1589,11 @@ static void App_UpdateDeliveryWatch(void)
     g_delivery_pending_decision = (uint8_t) g_delivery_task.pending_decision;
     g_delivery_visual_mode = g_delivery_task.visual_mode;
     g_delivery_visual_command_pending = g_delivery_task.visual_command_pending;
+    g_delivery_target_consensus_seen = g_delivery_task.target_consensus_seen;
+    g_delivery_post_alignment_digit_pending =
+        g_delivery_task.post_alignment_digit_pending;
+    g_delivery_post_alignment_start_ms =
+        g_delivery_task.post_alignment_start_ms;
     g_delivery_fault = ((g_delivery_task.state == DELIVERY_STATE_FAULT) ||
                         (g_delivery_task.planner.fault != 0U) ||
                         (g_delivery_maneuver.state == DELIVERY_MANEUVER_STATE_FAULT)) ? 1U : 0U;
@@ -1599,6 +1618,8 @@ static void App_DeliveryTaskUpdate(const App_LineObservation *line_observation)
                                g_k230_junction_direction_mask :
                                line_observation->direction_mask;
     }
+    input.junction_alignment_ready =
+        DeliveryManeuver_IsAlignmentReady(&g_delivery_maneuver);
     input.digit_fresh = Protocol_K230_IsDigitFresh();
     input.digit_new = Protocol_K230_TakeLatestDigitFrame(&digit_frame);
     if (input.digit_new != 0U) {
@@ -1989,10 +2010,27 @@ static void App_UpdateDeliveryManeuverWatch(
     const DeliveryManeuver_Output *output)
 {
     g_delivery_maneuver_state = (uint8_t) g_delivery_maneuver.state;
+    g_delivery_maneuver_align_phase = (uint8_t) g_delivery_maneuver.align_phase;
     g_delivery_maneuver_turn_phase = (uint8_t) g_delivery_maneuver.turn_phase;
+    g_delivery_maneuver_alignment_ready = g_delivery_maneuver.alignment_ready;
+    g_delivery_maneuver_decision_ready = g_delivery_maneuver.decision_ready;
+    g_delivery_maneuver_alignment_stable_count =
+        g_delivery_maneuver.alignment_stable_count;
+    g_delivery_maneuver_safe_heading_valid =
+        g_delivery_maneuver.safe_heading_valid;
     g_delivery_maneuver_fault = (uint8_t) g_delivery_maneuver.fault;
     g_delivery_maneuver_heading_target_deg =
         g_delivery_maneuver.target_heading_deg;
+    g_delivery_maneuver_approach_heading_deg =
+        g_delivery_maneuver.approach_heading_deg;
+    g_delivery_maneuver_junction_progress_cm =
+        g_delivery_maneuver.junction_progress_cm;
+    g_delivery_maneuver_filtered_line_error_px =
+        g_delivery_maneuver.filtered_line_error_px;
+    g_delivery_maneuver_filtered_line_angle_deg =
+        g_delivery_maneuver.filtered_line_angle_deg;
+    g_delivery_maneuver_visual_offset_deg =
+        g_delivery_maneuver.align_visual_offset_deg;
     g_delivery_maneuver_left_target_cm_s = output->left_target_cm_s;
     g_delivery_maneuver_right_target_cm_s = output->right_target_cm_s;
 }
@@ -2000,9 +2038,19 @@ static void App_UpdateDeliveryManeuverWatch(
 static void App_ResetDeliveryManeuverWatch(void)
 {
     g_delivery_maneuver_state = DELIVERY_MANEUVER_STATE_IDLE;
+    g_delivery_maneuver_align_phase = DELIVERY_MANEUVER_ALIGN_CREEP;
     g_delivery_maneuver_turn_phase = DELIVERY_MANEUVER_TURN_SETTLE;
+    g_delivery_maneuver_alignment_ready = 0U;
+    g_delivery_maneuver_decision_ready = 0U;
+    g_delivery_maneuver_alignment_stable_count = 0U;
+    g_delivery_maneuver_safe_heading_valid = 0U;
     g_delivery_maneuver_fault = DELIVERY_MANEUVER_FAULT_NONE;
     g_delivery_maneuver_heading_target_deg = 0.0f;
+    g_delivery_maneuver_approach_heading_deg = 0.0f;
+    g_delivery_maneuver_junction_progress_cm = 0.0f;
+    g_delivery_maneuver_filtered_line_error_px = 0.0f;
+    g_delivery_maneuver_filtered_line_angle_deg = 0.0f;
+    g_delivery_maneuver_visual_offset_deg = 0.0f;
     g_delivery_maneuver_left_target_cm_s = 0.0f;
     g_delivery_maneuver_right_target_cm_s = 0.0f;
 }
@@ -2025,10 +2073,14 @@ static void App_ApplyDeliveryManeuverOutput(
             output->right_target_cm_s);
         Bsp_Motor_SpeedPidUpdate();
         App_UpdateSpeedWatch();
-        g_line_control_state =
-            (g_delivery_maneuver.state == DELIVERY_MANEUVER_STATE_REACQUIRE) ?
-                APP_LINE_CONTROL_MANEUVER_REACQUIRE :
-                APP_LINE_CONTROL_MANEUVER_TURN;
+        if (g_delivery_maneuver.state == DELIVERY_MANEUVER_STATE_ALIGN) {
+            g_line_control_state = APP_LINE_CONTROL_MANEUVER_ALIGN;
+        } else if (g_delivery_maneuver.state ==
+                   DELIVERY_MANEUVER_STATE_REACQUIRE) {
+            g_line_control_state = APP_LINE_CONTROL_MANEUVER_REACQUIRE;
+        } else {
+            g_line_control_state = APP_LINE_CONTROL_MANEUVER_TURN;
+        }
         g_line_valid = observation->valid;
         g_line_target = observation->target;
         g_line_error = observation->error;
@@ -2042,14 +2094,15 @@ static void App_ApplyDeliveryManeuverOutput(
 }
 
 /*
- * 模式 7 的统一控制点：每周期只消费一次 L 帧，先完成路线决策，再由巡线或
- * 路口动作状态机取得唯一的电机控制权，避免 HOLD 后仍多走一个控制周期。
+ * 模式 7 的统一控制点：Task 负责识别与决策，Maneuver 在 DECIDE 期间并行
+ * 完成路口对正；Maneuver 活跃时始终拥有唯一电机控制权。
  */
 static void App_DeliveryLineTask(void)
 {
     App_LineObservation observation = {0};
     DeliveryManeuver_Input input = {0};
     DeliveryManeuver_Output output = {0};
+    uint8_t task_state_before;
     uint8_t request_result;
 
     if (App_TimeElapsed(&g_mode_last_task_ms, APP_LOOP_FAST_MS) == 0U) {
@@ -2058,17 +2111,36 @@ static void App_DeliveryLineTask(void)
 
     g_line_source = APP_LINE_SOURCE_K230;
     App_PrepareK230LineObservation(&observation);
+    task_state_before = g_delivery_task.state;
     App_DeliveryTaskUpdate(&observation);
     App_FillDeliveryManeuverInput(&observation, &input);
 
-    if ((g_delivery_task.state == DELIVERY_STATE_HOLD) &&
+    /* 新路口进入 DECIDE 的同一周期立即对正，不等待慢速 YOLO 先完成。 */
+    if ((task_state_before == DELIVERY_STATE_FOLLOW) &&
+        (g_delivery_task.state == DELIVERY_STATE_DECIDE) &&
         (g_delivery_maneuver.state == DELIVERY_MANEUVER_STATE_IDLE)) {
-        if (DeliveryManeuver_Start(
+        if (DeliveryManeuver_StartAlignment(
                 &g_delivery_maneuver,
-                g_delivery_task.pending_decision,
                 &input) == 0U) {
             DeliveryTask_FailPendingDecision(&g_delivery_task);
         }
+    }
+
+    /* Task 完成数字决策后只向现有 ALIGN 注入结果，不重新启动或重置距离。 */
+    if (g_delivery_task.state == DELIVERY_STATE_HOLD) {
+        if ((DeliveryManeuver_IsActive(&g_delivery_maneuver) == 0U) ||
+            (DeliveryManeuver_SetDecision(
+                 &g_delivery_maneuver,
+                 g_delivery_task.pending_decision) == 0U)) {
+            DeliveryManeuver_Reset(&g_delivery_maneuver);
+            DeliveryTask_FailPendingDecision(&g_delivery_task);
+        }
+    }
+
+    /* 规划层故障优先于动作层，禁止已失效任务继续持有电机控制权。 */
+    if ((g_delivery_task.state == DELIVERY_STATE_FAULT) &&
+        (DeliveryManeuver_IsActive(&g_delivery_maneuver) != 0U)) {
+        DeliveryManeuver_Reset(&g_delivery_maneuver);
     }
 
     if (DeliveryManeuver_IsActive(&g_delivery_maneuver) != 0U) {
@@ -2094,6 +2166,7 @@ static void App_DeliveryLineTask(void)
         return;
     }
 
+    App_UpdateDeliveryWatch();
     App_UpdateDeliveryManeuverWatch(&output);
     if ((g_delivery_task.state == DELIVERY_STATE_IDLE) ||
         (g_delivery_task.state == DELIVERY_STATE_FOLLOW)) {
@@ -2110,7 +2183,7 @@ static void App_DeliveryLineTask(void)
                 &observation);
         }
     } else {
-        /* IDENTIFY、TARGET_LOCKED、DECIDE、HOLD 和 FAULT 均停车等待下一步事件。 */
+        /* 没有活跃 Maneuver 时，识别、等待确认和故障状态统一保持停车。 */
         App_ResetK230HeadingControl();
         App_LineStopForState(APP_LINE_CONTROL_WAIT_FRAME);
     }
@@ -2690,6 +2763,9 @@ uint8_t App_DeliveryReset(void)
     g_delivery_pending_decision = ROUTE_DECISION_NONE;
     g_delivery_visual_mode = K230_VISUAL_MODE_OFF;
     g_delivery_visual_command_pending = g_delivery_task.visual_command_pending;
+    g_delivery_target_consensus_seen = 0U;
+    g_delivery_post_alignment_digit_pending = 0U;
+    g_delivery_post_alignment_start_ms = 0U;
     g_delivery_fault = 0U;
     return App_RequestMode(APP_MODE_STOPPED);
 }
@@ -2753,6 +2829,9 @@ void App_Init(void)
     g_delivery_pending_decision = ROUTE_DECISION_NONE;
     g_delivery_visual_mode = K230_VISUAL_MODE_OFF;
     g_delivery_visual_command_pending = 0U;
+    g_delivery_target_consensus_seen = 0U;
+    g_delivery_post_alignment_digit_pending = 0U;
+    g_delivery_post_alignment_start_ms = 0U;
     g_delivery_fault = 0U;
     App_ResetDeliveryManeuverWatch();
     App_ResetLineState();
