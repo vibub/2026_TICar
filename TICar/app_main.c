@@ -47,7 +47,7 @@
 /* 旧 CCD 模式在车体旋转 180°后左右语义反转，仍需通过架空轮和实车重新确认。 */
 #define APP_CCD_LINE_KP 0.0005f
 #define APP_CCD_LINE_KD 0.0010f
-#define APP_CCD_LINE_STEER_SIGN (-1.0f)
+#define APP_CCD_LINE_STEER_SIGN 1.0f
 #define APP_CCD_LINE_STEER_LIMIT 0.130f
 #define APP_CCD_LINE_MEDIUM_MIN_STEER 0.020f
 #define APP_CCD_LINE_LARGE_MIN_STEER 0.090f
